@@ -122,10 +122,11 @@ client.on('messageCreate', async message => {
 
     // --- DM FORWARDING LOGIC ---
     if (!message.guild) {
-        // Find staff-chat in any of the guilds the bot is in
+        // Forward to the specific staff chat
+        const staffChannelId = '1322884369370714254';
         let staffChannel = null;
         for (const guild of client.guilds.cache.values()) {
-            const channel = guild.channels.cache.find(c => c.name === 'staff-chat');
+            const channel = guild.channels.cache.get(staffChannelId);
             if (channel) {
                 staffChannel = channel;
                 break;
