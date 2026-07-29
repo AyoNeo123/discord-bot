@@ -1,0 +1,36 @@
+{
+  "1182582159899365400": [
+    {
+      "type": "WARN",
+      "reason": "u suck",
+      "moderatorId": "1146678290883551274",
+      "duration": null,
+      "timestamp": 1781594902059
+    }
+  ],
+  "1146678290883551274": [
+    {
+      "type": "WARN",
+      "reason": "u suck even more",
+      "moderatorId": "1146678290883551274",
+      "duration": null,
+      "timestamp": 1781594922495
+    },
+    {
+      "type": "WARN",
+      "reason": "ye",
+      "moderatorId": "1146678290883551274",
+      "duration": null,
+      "timestamp": 1781595180381
+    }
+  ],
+  "983615485209903146": [
+    {
+      "type": "WARN",
+      "reason": "test",
+      "moderatorId": "1146678290883551274",
+      "duration": null,
+      "timestamp": 1781595057764
+    }
+  ]
+}
