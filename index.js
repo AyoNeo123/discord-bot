@@ -805,7 +805,11 @@ client.on('interactionCreate', async interaction => {
                 new ActionRowBuilder().addComponents(descriptionInput)
             );
             
-            return interaction.showModal(modal);
+            try {
+                return await interaction.showModal(modal);
+            } catch (err) {
+                console.error("Failed to show giveaway setup modal:", err);
+            }
         }
         else if (interaction.commandName === 'help') {
             const isAdmin = interaction.member.permissions.has('ModerateMembers') || interaction.member.roles.cache.has('1261617213325049936');
@@ -955,7 +959,11 @@ client.on('interactionCreate', async interaction => {
                     .setRequired(true);
 
                 modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
-                return interaction.showModal(modal);
+            try {
+                return await interaction.showModal(modal);
+            } catch (err) {
+                console.error("Failed to show embed desc modal:", err);
+            }
             }
             else if (selected === 'ticket_partner') {
                 const modal = new ModalBuilder()
@@ -978,7 +986,11 @@ client.on('interactionCreate', async interaction => {
                     new ActionRowBuilder().addComponents(membersInput),
                     new ActionRowBuilder().addComponents(adInput)
                 );
-                return interaction.showModal(modal);
+            try {
+                return await interaction.showModal(modal);
+            } catch (err) {
+                console.error("Failed to show color modal:", err);
+            }
             }
             else if (selected === 'ticket_media') {
                 const modal = new ModalBuilder()
@@ -1001,7 +1013,11 @@ client.on('interactionCreate', async interaction => {
                     new ActionRowBuilder().addComponents(subsInput),
                     new ActionRowBuilder().addComponents(linkInput)
                 );
-                return interaction.showModal(modal);
+            try {
+                return await interaction.showModal(modal);
+            } catch (err) {
+                console.error("Failed to show image modal:", err);
+            }
             }
             else if (selected === 'ticket_giveaway') {
                 await interaction.deferReply({ ephemeral: true });
@@ -1434,7 +1450,11 @@ client.on('interactionCreate', async interaction => {
                 .setRequired(true);
 
             modal.addComponents(new ActionRowBuilder().addComponents(replyInput));
-            return interaction.showModal(modal);
+            try {
+                return await interaction.showModal(modal);
+            } catch (err) {
+                console.error("Failed to show user report modal:", err);
+            }
         }
 
         if (parts[0] === 'mng') {
@@ -1482,7 +1502,11 @@ client.on('interactionCreate', async interaction => {
                     .setRequired(true);
 
                 modal.addComponents(new ActionRowBuilder().addComponents(replyInput));
-                return interaction.showModal(modal);
+            try {
+                return await interaction.showModal(modal);
+            } catch (err) {
+                console.error("Failed to show apply modal:", err);
+            }
             }
             else if (action === 'history') {
                 const targetUser = await client.users.fetch(targetId);
@@ -1550,7 +1574,11 @@ client.on('interactionCreate', async interaction => {
             modal.addComponents(secondActionRow);
         }
 
-        await interaction.showModal(modal);
+        try {
+            await interaction.showModal(modal);
+        } catch (err) {
+            console.error("Failed to show message reply modal:", err);
+        }
     }
 
     // 4. Modals
