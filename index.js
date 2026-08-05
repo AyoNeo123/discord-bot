@@ -120,6 +120,9 @@ client.on('messageCreate', async message => {
     // Ignore messages from other bots
     if (message.author.bot) return;
 
+    // Ignore messages in specific category
+    if (message.channel.parentId === '1261616857056542730') return;
+
     // --- DM FORWARDING LOGIC ---
     if (!message.guild) {
         // Forward to the specific staff chat
@@ -154,9 +157,8 @@ client.on('messageCreate', async message => {
 
     // --- AI CHAT LOGIC ---
     const isBotMentioned = message.mentions.has(client.user.id) || message.content.toLowerCase().includes('bunji bot');
-    const isReplyToBot = message.reference && message.mentions.repliedUser && message.mentions.repliedUser.id === client.user.id;
 
-    if (isBotMentioned || isReplyToBot) {
+    if (isBotMentioned) {
         await message.channel.sendTyping();
 
         try {
@@ -211,7 +213,7 @@ client.on('messageCreate', async message => {
             const chatMessages = [
                 {
                     role: "system",
-                    content: "You are a helpful and friendly Discord bot. Keep your answers concise." + (isAdmin ? " You have permission to use the delete_user_messages tool if the user asks you to delete messages from a specific user." : "")
+                    content: "You are a helpful Discord bot designed specifically to answer questions about your own bot functionality, server commands, and server features. Keep your answers concise. Do not answer general knowledge questions outside of your scope as a bot." + (isAdmin ? " You have permission to use the delete_user_messages tool if the user asks you to delete messages from a specific user." : "")
                 },
                 {
                     role: "user",
@@ -289,9 +291,12 @@ client.on('messageCreate', async message => {
     // --- PING PROTECTION LOGIC ---
     // Check if the message is a reply to the protected user
     const isReplyToProtectedUser = message.reference && message.mentions.repliedUser && message.mentions.repliedUser.id === PROTECTED_USER_ID;
+    
+    // Check if user is staff (immune to ping protection)
+    const isStaff = message.member && (message.member.permissions.has('ModerateMembers') || LIMITED_STAFF_ROLES.some(r => message.member.roles.cache.has(r)));
 
-    // Only trigger if they pinged the user, AND it's not a direct reply to them
-    if (message.mentions.has(PROTECTED_USER_ID) && !isReplyToProtectedUser) {
+    // Only trigger if they pinged the user, it's not a direct reply, and they aren't staff
+    if (message.mentions.has(PROTECTED_USER_ID) && !isReplyToProtectedUser && !isStaff) {
         // Attempt to delete the message
         try {
             await message.delete();
@@ -376,18 +381,23 @@ client.on('messageCreate', async message => {
     }
 
     // --- STREAM SCHEDULE LOGIC ---
-    if (content.includes('stream') || content.includes('schedule')) {
-        const isAskingAboutStream = content.includes('when') || 
-                                    content.includes('today') || 
-                                    content.includes('time') ||
-                                    content.includes('schedule') ||
-                                    content.includes('no stream') || 
-                                    content.includes('?') || 
-                                    content.trim() === 'stream' || 
-                                    content.trim() === 'streams';
-                                    
-        if (isAskingAboutStream) {
-            message.reply('Bunji streams on **Tuesday, Thursday, Saturday, and Sunday** from **7 PM to 9 PM AEST**! Catch the stream here: https://www.youtube.com/@BunjiMC');
+    if (content.includes('stream') && content.includes('bunji')) {
+        try {
+            const streamCheck = await groq.chat.completions.create({
+                messages: [
+                    {role: "system", content: "Reply 'YES' if the user is asking about the Bunji stream schedule or when Bunji streams, otherwise reply 'NO'. Answer strictly with YES or NO."}, 
+                    {role: "user", content: message.content}
+                ],
+                model: "llama-3.3-70b-versatile",
+                temperature: 0,
+                max_tokens: 5
+            });
+            
+            if (streamCheck.choices[0]?.message.content.includes('YES')) {
+                message.reply('Bunji streams on **Tuesday, Thursday, Saturday, and Sunday** from **7 PM to 9 PM AEST**! Catch the stream here: https://www.youtube.com/@BunjiMC');
+            }
+        } catch (e) {
+            console.error("Stream check AI error:", e);
         }
     }
 });
