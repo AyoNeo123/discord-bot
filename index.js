@@ -2,7 +2,73 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, Partials, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ChannelType, PermissionFlagsBits, UserSelectMenuBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+const ms = require('ms');
 const { Groq } = require('groq-sdk');
+
+const TEMP_ACTIONS_FILE = path.join(__dirname, 'temporaryActions.json');
+function loadTempActions() {
+    if (fs.existsSync(TEMP_ACTIONS_FILE)) {
+        try {
+            return JSON.parse(fs.readFileSync(TEMP_ACTIONS_FILE, 'utf8'));
+        } catch(e) {
+            console.error('Error reading temporary actions:', e);
+        }
+    }
+    return { temproles: [], locks: [], bans: [] };
+}
+function saveTempActions(data) {
+    fs.writeFileSync(TEMP_ACTIONS_FILE, JSON.stringify(data, null, 2));
+}
+
+async function checkTemporaryActions(client) {
+    const data = loadTempActions();
+    const now = Date.now();
+    let updated = false;
+
+    // Check temproles
+    data.temproles = data.temproles.filter(action => {
+        if (now >= action.expiresAt) {
+            client.guilds.fetch(action.guildId).then(guild => {
+                return guild.members.fetch(action.userId).then(member => {
+                    member.roles.remove(action.roleId).catch(() => {});
+                });
+            }).catch(() => {});
+            updated = true;
+            return false;
+        }
+        return true;
+    });
+
+    // Check bans
+    data.bans = data.bans.filter(action => {
+        if (now >= action.expiresAt) {
+            client.guilds.fetch(action.guildId).then(guild => {
+                guild.members.unban(action.userId, "Temporary ban expired").catch(() => {});
+            }).catch(() => {});
+            updated = true;
+            return false;
+        }
+        return true;
+    });
+
+    // Check locks
+    data.locks = data.locks.filter(action => {
+        if (now >= action.expiresAt) {
+            client.channels.fetch(action.channelId).then(channel => {
+                if (channel && channel.isTextBased()) {
+                    channel.permissionOverwrites.edit(channel.guild.roles.everyone, { SendMessages: null }).catch(() => {});
+                }
+            }).catch(() => {});
+            updated = true;
+            return false;
+        }
+        return true;
+    });
+
+    if (updated) {
+        saveTempActions(data);
+    }
+}
 
 const TICKET_COUNTS_FILE = path.join(__dirname, 'ticket-counts.json');
 function getNextTicketNumber(type) {
@@ -80,8 +146,8 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.DirectMessages,
-        GatewayIntentBits.GuildMembers
+        GatewayIntentBits.DirectMessages
+        // GatewayIntentBits.GuildMembers // REQUIRES INTENT ENABLED ON DISCORD PORTAL
     ],
     partials: [Partials.Channel]
 });
@@ -473,8 +539,44 @@ function savePunishment(userId, type, reason, moderatorId, duration = null) {
         )
         .setTimestamp()
         .setColor('#ff0000');
+
     if (duration) embed.addFields({ name: 'Duration', value: duration, inline: true });
     sendLog(NORMAL_LOG_CHANNEL, embed);
+}
+
+function deletePunishment(userId, index) {
+    const data = loadPunishments();
+    if (!data[userId] || !data[userId][index]) return false;
+    data[userId].splice(index, 1);
+    if (data[userId].length === 0) delete data[userId];
+    fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+    return true;
+}
+
+const notesDbPath = path.join(__dirname, 'notes.json');
+function loadNotes() {
+    if (!fs.existsSync(notesDbPath)) {
+        fs.writeFileSync(notesDbPath, JSON.stringify({}));
+    }
+    return JSON.parse(fs.readFileSync(notesDbPath));
+}
+function saveNote(userId, moderatorId, noteContent) {
+    const data = loadNotes();
+    if (!data[userId]) data[userId] = [];
+    data[userId].push({
+        moderatorId,
+        content: noteContent,
+        timestamp: Date.now()
+    });
+    fs.writeFileSync(notesDbPath, JSON.stringify(data, null, 2));
+}
+function deleteNote(userId, index) {
+    const data = loadNotes();
+    if (!data[userId] || !data[userId][index]) return false;
+    data[userId].splice(index, 1);
+    if (data[userId].length === 0) delete data[userId];
+    fs.writeFileSync(notesDbPath, JSON.stringify(data, null, 2));
+    return true;
 }
 
 const levelsDbPath = './levels.json';
@@ -556,6 +658,161 @@ function getGuideComponents(pageIndex) {
 
 // --- SLASH COMMAND REGISTRATION ---
 const commands = [
+    {
+        name: 'delwarn',
+        description: 'Delete a warning from a user',
+        options: [
+            { name: 'user', description: 'The user to remove a warning from', type: 6, required: true },
+            { name: 'warn_id', description: 'The warning ID (number) to remove', type: 4, required: true }
+        ]
+    },
+    {
+        name: 'note',
+        description: 'Manage notes for a user',
+        options: [
+            {
+                name: 'add',
+                description: 'Add a note to a user',
+                type: 1,
+                options: [
+                    { name: 'user', description: 'The user to add a note to', type: 6, required: true },
+                    { name: 'note', description: 'The note content', type: 3, required: true }
+                ]
+            },
+            {
+                name: 'delete',
+                description: 'Delete a note from a user',
+                type: 1,
+                options: [
+                    { name: 'user', description: 'The user to remove a note from', type: 6, required: true },
+                    { name: 'note_id', description: 'The note ID (number) to remove', type: 4, required: true }
+                ]
+            }
+        ]
+    },
+    {
+        name: 'temprole',
+        description: 'Assign/unassign a role for a limited time',
+        options: [
+            { name: 'user', description: 'The user to give the role to', type: 6, required: true },
+            { name: 'time', description: 'Duration (e.g. 10m, 1h, 2d)', type: 3, required: true },
+            { name: 'role', description: 'The role to assign', type: 8, required: true },
+            { name: 'reason', description: 'Reason for assigning', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'unban',
+        description: 'Unban a member',
+        options: [
+            { name: 'userid', description: 'The user ID of the banned member', type: 3, required: true },
+            { name: 'reason', description: 'Reason for unban', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'undeafen',
+        description: 'Undeafen a member',
+        options: [
+            { name: 'user', description: 'The user to undeafen', type: 6, required: true },
+            { name: 'reason', description: 'Reason for undeafening', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'unlock',
+        description: 'Unlock a channel',
+        options: [
+            { name: 'channel', description: 'The channel to unlock', type: 7, required: true },
+            { name: 'reason', description: 'Reason for unlock', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'unmute',
+        description: 'Unmute a member',
+        options: [
+            { name: 'user', description: 'The user to unmute', type: 6, required: true },
+            { name: 'reason', description: 'Reason for unmute', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'softban',
+        description: 'Softban a member (ban and immediately unban to delete messages)',
+        options: [
+            { name: 'user', description: 'The user to softban', type: 6, required: true },
+            { name: 'reason', description: 'Reason for softban', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'mute',
+        description: 'Mute a member so they cannot type',
+        options: [
+            { name: 'user', description: 'The user to mute', type: 6, required: true },
+            { name: 'limit', description: 'Duration (e.g. 10m, 1h, 2d)', type: 3, required: false },
+            { name: 'reason', description: 'Reason for mute', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'modlogs',
+        description: 'Get a list of moderation logs for a user',
+        options: [
+            { name: 'user', description: 'The user to check', type: 6, required: true }
+        ]
+    },
+    {
+        name: 'kick',
+        description: 'Kick a member',
+        options: [
+            { name: 'user', description: 'The user to kick', type: 6, required: true },
+            { name: 'reason', description: 'Reason for kick', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'lock',
+        description: 'Lock a channel',
+        options: [
+            { name: 'channel', description: 'The channel to lock', type: 7, required: true },
+            { name: 'limit', description: 'Duration (e.g. 10m, 1h, 2d)', type: 3, required: false },
+            { name: 'reason', description: 'Reason for lock', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'members',
+        description: 'List members in a role',
+        options: [
+            { name: 'role', description: 'The role to check', type: 8, required: true }
+        ]
+    },
+    {
+        name: 'deafen',
+        description: 'Deafen a member',
+        options: [
+            { name: 'user', description: 'The user to deafen', type: 6, required: true },
+            { name: 'reason', description: 'Reason for deafening', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'ban',
+        description: 'Ban a member',
+        options: [
+            { name: 'user', description: 'The user to ban', type: 6, required: true },
+            { name: 'limit', description: 'Duration (e.g. 10m, 1h, 2d)', type: 3, required: false },
+            { name: 'reason', description: 'Reason for ban', type: 3, required: false }
+        ]
+    },
+    {
+        name: 'setnick',
+        description: 'Change the nickname of a user',
+        options: [
+            { name: 'user', description: 'The user to change nickname for', type: 6, required: true },
+            { name: 'nickname', description: 'The new nickname', type: 3, required: true }
+        ]
+    },
+    {
+        name: 'announce',
+        description: 'Send an announcement using the bot',
+        options: [
+            { name: 'channel', description: 'The channel to send the announcement to', type: 7, required: true },
+            { name: 'message', description: 'The message to announce', type: 3, required: true }
+        ]
+    },
     {
         name: 'levels',
         description: 'View your or another user\'s level',
@@ -724,6 +981,10 @@ client.once('ready', async () => {
             scheduleGiveaway(messageId, data.endTime);
         }
     }
+    
+    // Start temporary actions checker
+    setInterval(() => checkTemporaryActions(client), 60000);
+    checkTemporaryActions(client);
 });
 
 // --- GIVEAWAY SCHEDULING ---
@@ -990,7 +1251,8 @@ client.on('interactionCreate', async interaction => {
                 .addComponents(
                     new ButtonBuilder().setCustomId(`mng_punish_${targetUser.id}`).setLabel('Punish User').setStyle(ButtonStyle.Danger),
                     new ButtonBuilder().setCustomId(`mng_dm_${targetUser.id}`).setLabel('Send Bot DM').setStyle(ButtonStyle.Primary).setDisabled(!canBanAndDM),
-                    new ButtonBuilder().setCustomId(`mng_history_${targetUser.id}`).setLabel('History').setStyle(ButtonStyle.Secondary)
+                    new ButtonBuilder().setCustomId(`mng_history_${targetUser.id}`).setLabel('History').setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder().setCustomId(`mng_notes_${targetUser.id}`).setLabel('Notes').setStyle(ButtonStyle.Secondary)
                 );
 
             await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
@@ -1154,6 +1416,268 @@ client.on('interactionCreate', async interaction => {
             }
             
             return interaction.reply({ content: `Successfully added **${levelsToAdd} levels** to <@${targetUser.id}>! They are now **Level ${targetLevel}**.` });
+        }
+        // --- NEW MODERATION COMMANDS ---
+        else if (['temprole', 'unban', 'undeafen', 'unlock', 'unmute', 'softban', 'mute', 'modlogs', 'kick', 'lock', 'members', 'deafen', 'ban', 'setnick', 'announce', 'delwarn', 'note'].includes(interaction.commandName)) {
+            const hasModPerm = interaction.member.permissions.has('ModerateMembers') || interaction.member.roles.cache.has('1261617213325049936');
+            if (!hasModPerm) return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+
+            const cmd = interaction.commandName;
+            
+            if (cmd === 'temprole') {
+                const targetUser = interaction.options.getUser('user');
+                const timeStr = interaction.options.getString('time');
+                const role = interaction.options.getRole('role');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                
+                const durationMs = ms(timeStr);
+                if (!durationMs) return interaction.reply({ content: 'Invalid time format! Use something like 10m, 1h, 2d.', ephemeral: true });
+                
+                try {
+                    const member = await interaction.guild.members.fetch(targetUser.id);
+                    await member.roles.add(role.id, reason);
+                    
+                    const temp = loadTempActions();
+                    temp.temproles.push({
+                        guildId: interaction.guild.id,
+                        userId: targetUser.id,
+                        roleId: role.id,
+                        expiresAt: Date.now() + durationMs
+                    });
+                    saveTempActions(temp);
+                    
+                    return interaction.reply({ content: `✅ Added ${role} to ${targetUser} for ${ms(durationMs, { long: true })}.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to assign role: ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'unban') {
+                const userId = interaction.options.getString('userid');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                try {
+                    await interaction.guild.members.unban(userId, reason);
+                    return interaction.reply({ content: `✅ Unbanned user with ID \`${userId}\`.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to unban (make sure they are actually banned and ID is correct): ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'undeafen') {
+                const targetUser = interaction.options.getUser('user');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                try {
+                    const member = await interaction.guild.members.fetch(targetUser.id);
+                    await member.voice.setDeaf(false, reason);
+                    return interaction.reply({ content: `✅ Undeafened ${targetUser}.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to undeafen (are they in a voice channel?): ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'unlock') {
+                const targetChannel = interaction.options.getChannel('channel');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                try {
+                    await targetChannel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: null }, { reason });
+                    return interaction.reply({ content: `✅ Unlocked ${targetChannel}.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to unlock channel: ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'unmute') {
+                const targetUser = interaction.options.getUser('user');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                try {
+                    const member = await interaction.guild.members.fetch(targetUser.id);
+                    await member.timeout(null, reason);
+                    return interaction.reply({ content: `✅ Unmuted ${targetUser}.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to unmute: ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'softban') {
+                const targetUser = interaction.options.getUser('user');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                try {
+                    await interaction.guild.members.ban(targetUser.id, { deleteMessageSeconds: 604800, reason: `Softban: ${reason}` });
+                    await interaction.guild.members.unban(targetUser.id, `Softban: ${reason}`);
+                    return interaction.reply({ content: `✅ Softbanned ${targetUser} (messages cleared).` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to softban: ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'mute') {
+                const targetUser = interaction.options.getUser('user');
+                const limitStr = interaction.options.getString('limit');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                let durationMs = 28 * 24 * 60 * 60 * 1000; // Default max timeout 28 days
+                if (limitStr) {
+                    const parsed = ms(limitStr);
+                    if (!parsed) return interaction.reply({ content: 'Invalid time format! Use something like 10m, 1h, 2d.', ephemeral: true });
+                    durationMs = parsed;
+                }
+                try {
+                    const member = await interaction.guild.members.fetch(targetUser.id);
+                    await member.timeout(durationMs, reason);
+                    return interaction.reply({ content: `✅ Muted ${targetUser} for ${ms(durationMs, { long: true })}.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to mute: ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'modlogs') {
+                const targetUser = interaction.options.getUser('user');
+                const data = loadPunishments();
+                const history = data[targetUser.id] || [];
+
+                if (history.length === 0) {
+                    return interaction.reply({ content: `<@${targetUser.id}> has no moderation history.`, ephemeral: true });
+                }
+
+                const embed = new EmbedBuilder()
+                    .setTitle(`Moderation History for ${targetUser.username}`)
+                    .setColor('#0099ff')
+                    .setTimestamp();
+
+                let desc = '';
+                history.forEach((h, i) => {
+                    desc += `**${i + 1}. [${h.type}]**\nReason: ${h.reason}\nModerator: <@${h.moderatorId}>\nDate: <t:${Math.floor(h.timestamp / 1000)}:f>\n\n`;
+                });
+                embed.setDescription(desc || 'No valid history.');
+                return interaction.reply({ embeds: [embed] });
+            }
+            else if (cmd === 'kick') {
+                const targetUser = interaction.options.getUser('user');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                try {
+                    const member = await interaction.guild.members.fetch(targetUser.id);
+                    await member.kick(reason);
+                    return interaction.reply({ content: `✅ Kicked ${targetUser}.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to kick: ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'lock') {
+                const targetChannel = interaction.options.getChannel('channel');
+                const limitStr = interaction.options.getString('limit');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                try {
+                    await targetChannel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: false }, { reason });
+                    
+                    if (limitStr) {
+                        const durationMs = ms(limitStr);
+                        if (durationMs) {
+                            const temp = loadTempActions();
+                            temp.locks.push({
+                                channelId: targetChannel.id,
+                                expiresAt: Date.now() + durationMs
+                            });
+                            saveTempActions(temp);
+                            return interaction.reply({ content: `✅ Locked ${targetChannel} for ${ms(durationMs, { long: true })}.` });
+                        }
+                    }
+                    return interaction.reply({ content: `✅ Locked ${targetChannel}.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to lock channel: ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'members') {
+                const role = interaction.options.getRole('role');
+                const membersWithRole = interaction.guild.members.cache.filter(m => m.roles.cache.has(role.id));
+                const count = membersWithRole.size;
+                const topMembers = membersWithRole.first(20).map(m => m.user.tag).join('\n');
+                
+                const embed = new EmbedBuilder()
+                    .setTitle(`Members in ${role.name}`)
+                    .setDescription(`**Total:** ${count}\n\n${topMembers}${count > 20 ? `\n...and ${count - 20} more.` : ''}`)
+                    .setColor(role.color || '#99aab5');
+                return interaction.reply({ embeds: [embed] });
+            }
+            else if (cmd === 'deafen') {
+                const targetUser = interaction.options.getUser('user');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                try {
+                    const member = await interaction.guild.members.fetch(targetUser.id);
+                    await member.voice.setDeaf(true, reason);
+                    return interaction.reply({ content: `✅ Deafened ${targetUser}.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to deafen (are they in a voice channel?): ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'ban') {
+                const targetUser = interaction.options.getUser('user');
+                const limitStr = interaction.options.getString('limit');
+                const reason = interaction.options.getString('reason') || 'No reason provided';
+                try {
+                    await interaction.guild.members.ban(targetUser.id, { reason });
+                    
+                    if (limitStr) {
+                        const durationMs = ms(limitStr);
+                        if (durationMs) {
+                            const temp = loadTempActions();
+                            temp.bans.push({
+                                guildId: interaction.guild.id,
+                                userId: targetUser.id,
+                                expiresAt: Date.now() + durationMs
+                            });
+                            saveTempActions(temp);
+                            return interaction.reply({ content: `✅ Banned ${targetUser} for ${ms(durationMs, { long: true })}.` });
+                        }
+                    }
+                    return interaction.reply({ content: `✅ Banned ${targetUser}.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to ban: ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'setnick') {
+                const targetUser = interaction.options.getUser('user');
+                const nickname = interaction.options.getString('nickname');
+                try {
+                    const member = await interaction.guild.members.fetch(targetUser.id);
+                    await member.setNickname(nickname);
+                    return interaction.reply({ content: `✅ Changed ${targetUser}'s nickname to **${nickname}**.` });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to change nickname (hierarchy error?): ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'announce') {
+                const targetChannel = interaction.options.getChannel('channel');
+                const message = interaction.options.getString('message');
+                try {
+                    await targetChannel.send({ content: message });
+                    return interaction.reply({ content: `✅ Announcement sent to ${targetChannel}.`, ephemeral: true });
+                } catch (e) {
+                    return interaction.reply({ content: `Failed to send announcement: ${e.message}`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'delwarn') {
+                const targetUser = interaction.options.getUser('user');
+                const warnId = interaction.options.getInteger('warn_id') - 1; // 0-indexed
+                if (warnId < 0) return interaction.reply({ content: `Invalid warning ID.`, ephemeral: true });
+                
+                const success = deletePunishment(targetUser.id, warnId);
+                if (success) {
+                    return interaction.reply({ content: `✅ Successfully deleted warning ID ${warnId + 1} from ${targetUser}.` });
+                } else {
+                    return interaction.reply({ content: `Failed to find warning ID ${warnId + 1} for ${targetUser}.`, ephemeral: true });
+                }
+            }
+            else if (cmd === 'note') {
+                const subcmd = interaction.options.getSubcommand();
+                const targetUser = interaction.options.getUser('user');
+                
+                if (subcmd === 'add') {
+                    const note = interaction.options.getString('note');
+                    saveNote(targetUser.id, interaction.user.id, note);
+                    return interaction.reply({ content: `✅ Note added to ${targetUser}.` });
+                } else if (subcmd === 'delete') {
+                    const noteId = interaction.options.getInteger('note_id') - 1;
+                    if (noteId < 0) return interaction.reply({ content: `Invalid note ID.`, ephemeral: true });
+                    const success = deleteNote(targetUser.id, noteId);
+                    if (success) {
+                        return interaction.reply({ content: `✅ Successfully deleted note ID ${noteId + 1} from ${targetUser}.` });
+                    } else {
+                        return interaction.reply({ content: `Failed to find note ID ${noteId + 1} for ${targetUser}.`, ephemeral: true });
+                    }
+                }
+            }
         }
         else if (interaction.commandName === 'testwelcome') {
             if (!interaction.member.permissions.has('ModerateMembers') && !interaction.member.roles.cache.has('1261617213325049936')) {
@@ -1800,10 +2324,75 @@ client.on('interactionCreate', async interaction => {
                     const date = new Date(record.timestamp).toLocaleDateString();
                     let desc = `**Reason:** ${record.reason}\n**Moderator:** <@${record.moderatorId}>\n**Date:** ${date}`;
                     if (record.duration) desc += `\n**Duration:** ${record.duration}`;
-                    embed.addFields({ name: `${index + 1}. ${record.type}`, value: desc });
+                    embed.addFields({ name: `ID: ${index + 1} | ${record.type}`, value: desc });
                 });
 
-                return interaction.update({ embeds: [embed], components: [], content: null });
+                const row = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId(`mng_delwarn_${targetId}`).setLabel('Delete Warn').setStyle(ButtonStyle.Danger)
+                );
+
+                return interaction.update({ embeds: [embed], components: [row], content: null });
+            }
+            else if (action === 'notes') {
+                const targetUser = await client.users.fetch(targetId);
+                const data = loadNotes();
+                const userNotes = data[targetId] || [];
+
+                const embed = new EmbedBuilder()
+                    .setTitle(`Staff Notes: ${targetUser.tag}`)
+                    .setColor('#ffff00');
+
+                if (userNotes.length === 0) {
+                    embed.setDescription('No notes found for this user.');
+                } else {
+                    userNotes.forEach((note, index) => {
+                        const date = new Date(note.timestamp).toLocaleDateString();
+                        embed.addFields({ name: `ID: ${index + 1} | <t:${Math.floor(note.timestamp/1000)}:d>`, value: `${note.content}\n- By <@${note.moderatorId}>` });
+                    });
+                }
+
+                const row = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId(`mng_addnote_${targetId}`).setLabel('Add Note').setStyle(ButtonStyle.Success),
+                    new ButtonBuilder().setCustomId(`mng_delnote_${targetId}`).setLabel('Delete Note').setStyle(ButtonStyle.Danger).setDisabled(userNotes.length === 0)
+                );
+
+                return interaction.update({ embeds: [embed], components: [row], content: null });
+            }
+            else if (action === 'delwarn') {
+                const modal = new ModalBuilder()
+                    .setCustomId(`modaldelwarn_${targetId}`)
+                    .setTitle(`Delete Warning`);
+                const idInput = new TextInputBuilder()
+                    .setCustomId('warnid')
+                    .setLabel("Warning ID (number):")
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
+                modal.addComponents(new ActionRowBuilder().addComponents(idInput));
+                return await interaction.showModal(modal);
+            }
+            else if (action === 'addnote') {
+                const modal = new ModalBuilder()
+                    .setCustomId(`modaladdnote_${targetId}`)
+                    .setTitle(`Add Staff Note`);
+                const noteInput = new TextInputBuilder()
+                    .setCustomId('notetext')
+                    .setLabel("Note content:")
+                    .setStyle(TextInputStyle.Paragraph)
+                    .setRequired(true);
+                modal.addComponents(new ActionRowBuilder().addComponents(noteInput));
+                return await interaction.showModal(modal);
+            }
+            else if (action === 'delnote') {
+                const modal = new ModalBuilder()
+                    .setCustomId(`modaldelnote_${targetId}`)
+                    .setTitle(`Delete Staff Note`);
+                const idInput = new TextInputBuilder()
+                    .setCustomId('noteid')
+                    .setLabel("Note ID (number):")
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
+                modal.addComponents(new ActionRowBuilder().addComponents(idInput));
+                return await interaction.showModal(modal);
             }
         }
 
@@ -2048,6 +2637,39 @@ client.on('interactionCreate', async interaction => {
             } catch (err) {
                 console.error("Manage DM error:", err);
                 return interaction.editReply(`Failed to send DM to that user. They might have DMs disabled.`);
+            }
+        }
+
+        if (parts[0] === 'modaldelwarn') {
+            const targetId = parts[1];
+            const warnId = parseInt(interaction.fields.getTextInputValue('warnid')) - 1;
+            if (isNaN(warnId) || warnId < 0) return interaction.reply({ content: `Invalid warning ID.`, ephemeral: true });
+            
+            const success = deletePunishment(targetId, warnId);
+            if (success) {
+                return interaction.reply({ content: `✅ Successfully deleted warning ID ${warnId + 1} from <@${targetId}>.`, ephemeral: true });
+            } else {
+                return interaction.reply({ content: `Failed to find warning ID ${warnId + 1}.`, ephemeral: true });
+            }
+        }
+
+        if (parts[0] === 'modaladdnote') {
+            const targetId = parts[1];
+            const noteText = interaction.fields.getTextInputValue('notetext');
+            saveNote(targetId, interaction.user.id, noteText);
+            return interaction.reply({ content: `✅ Note added to <@${targetId}>.`, ephemeral: true });
+        }
+
+        if (parts[0] === 'modaldelnote') {
+            const targetId = parts[1];
+            const noteId = parseInt(interaction.fields.getTextInputValue('noteid')) - 1;
+            if (isNaN(noteId) || noteId < 0) return interaction.reply({ content: `Invalid note ID.`, ephemeral: true });
+            
+            const success = deleteNote(targetId, noteId);
+            if (success) {
+                return interaction.reply({ content: `✅ Successfully deleted note ID ${noteId + 1} from <@${targetId}>.`, ephemeral: true });
+            } else {
+                return interaction.reply({ content: `Failed to find note ID ${noteId + 1}.`, ephemeral: true });
             }
         }
 
