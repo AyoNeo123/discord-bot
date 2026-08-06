@@ -80,7 +80,8 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.DirectMessages
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildMembers
     ],
     partials: [Partials.Channel]
 });
@@ -1064,8 +1065,8 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ embeds: [embed] });
         }
         else if (interaction.commandName === 'leveltransfer') {
-            if (!interaction.member.permissions.has('ModerateMembers') && !interaction.member.roles.cache.has('1261617213325049936')) {
-                return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+            if (!interaction.member.roles.cache.has('1261617213325049936')) {
+                return interaction.reply({ content: 'You do not have permission to use this command. Requires specific Admin role.', ephemeral: true });
             }
 
             const sourceUser = interaction.options.getUser('source');
@@ -1110,8 +1111,8 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ content: `Successfully transferred **${sourceTotalXp} XP** from <@${sourceUser.id}> to <@${targetUser.id}>! <@${targetUser.id}> is now **Level ${levels[targetUser.id].level}**.` });
         }
         else if (interaction.commandName === 'leveladd') {
-            if (!interaction.member.permissions.has('ModerateMembers') && !interaction.member.roles.cache.has('1261617213325049936')) {
-                return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+            if (!interaction.member.roles.cache.has('1261617213325049936')) {
+                return interaction.reply({ content: 'You do not have permission to use this command. Requires specific Admin role.', ephemeral: true });
             }
 
             const targetUser = interaction.options.getUser('user');
@@ -1142,6 +1143,15 @@ client.on('interactionCreate', async interaction => {
             levels[targetUser.id].xp = 0; // Exactly at the start of the new level
             
             saveLevels(levels);
+            
+            try {
+                const levelUpChannel = client.channels.cache.get('1306995175494651977');
+                if (levelUpChannel) {
+                    await levelUpChannel.send(`🎉 Congratulations <@${targetUser.id}>! You just advanced to **Level ${targetLevel}**!`);
+                }
+            } catch (e) {
+                console.error("Failed to send forced level up message:", e);
+            }
             
             return interaction.reply({ content: `Successfully added **${levelsToAdd} levels** to <@${targetUser.id}>! They are now **Level ${targetLevel}**.` });
         }
