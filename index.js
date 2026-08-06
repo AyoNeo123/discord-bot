@@ -92,6 +92,7 @@ client.once('ready', () => {
 
 // Store warnings for users. Key: User ID, Value: Timestamp
 const warnings = new Map();
+const xpCooldowns = new Map();
 const PROTECTED_USER_ID = '1187690305516994631';
 const HELP_ROLE_ID = '1323180252666663043';
 const TICKET_STAFF_ROLE_ID = '1373246947732885684';
@@ -153,6 +154,45 @@ client.on('messageCreate', async message => {
         
         // Since it's a DM, none of the guild-specific logic below should run
         return;
+    }
+
+    // --- XP & LEVELING LOGIC ---
+    if (!message.content.startsWith('/')) { // Ignore commands
+        const now = Date.now();
+        const userId = message.author.id;
+        
+        // Check cooldown (60 seconds)
+        if (!xpCooldowns.has(userId) || (now - xpCooldowns.get(userId) > 60000)) {
+            // Generate random XP between 15 and 25
+            const xpGained = Math.floor(Math.random() * 11) + 15;
+            
+            const levels = loadLevels();
+            if (!levels[userId]) {
+                levels[userId] = { xp: 0, level: 0, totalXp: 0 };
+            }
+            
+            levels[userId].xp += xpGained;
+            levels[userId].totalXp += xpGained;
+            xpCooldowns.set(userId, now);
+            
+            const reqXp = getXpForNextLevel(levels[userId].level);
+            if (levels[userId].xp >= reqXp) {
+                // Level Up!
+                levels[userId].xp -= reqXp;
+                levels[userId].level += 1;
+                
+                try {
+                    const levelUpChannel = client.channels.cache.get('1306995175494651977');
+                    if (levelUpChannel) {
+                        await levelUpChannel.send(`🎉 Congratulations <@${userId}>! You just advanced to **Level ${levels[userId].level}**!`);
+                    }
+                } catch (e) {
+                    console.error("Failed to send level up message:", e);
+                }
+            }
+            
+            saveLevels(levels);
+        }
     }
 
     // --- AI CHAT LOGIC ---
@@ -436,6 +476,32 @@ function savePunishment(userId, type, reason, moderatorId, duration = null) {
     sendLog(NORMAL_LOG_CHANNEL, embed);
 }
 
+const levelsDbPath = './levels.json';
+function loadLevels() {
+    if (!fs.existsSync(levelsDbPath)) {
+        fs.writeFileSync(levelsDbPath, JSON.stringify({}));
+    }
+    return JSON.parse(fs.readFileSync(levelsDbPath));
+}
+
+function saveLevels(data) {
+    fs.writeFileSync(levelsDbPath, JSON.stringify(data, null, 2));
+}
+
+function getXpForNextLevel(level) {
+    return 5 * Math.pow(level, 2) + 50 * level + 100;
+}
+
+// Generate a progress bar string
+function generateProgressBar(currentXp, requiredXp, totalBars = 10) {
+    const percentage = Math.max(0, Math.min(1, currentXp / requiredXp));
+    const filledBars = Math.round(percentage * totalBars);
+    const emptyBars = totalBars - filledBars;
+    const filledChar = '█';
+    const emptyChar = '░';
+    return `[${filledChar.repeat(filledBars)}${emptyChar.repeat(emptyBars)}] ${Math.floor(percentage * 100)}%`;
+}
+
 // --- GUIDE CONFIGURATION ---
 const GUIDE_PAGES = [
     new EmbedBuilder()
@@ -489,6 +555,22 @@ function getGuideComponents(pageIndex) {
 
 // --- SLASH COMMAND REGISTRATION ---
 const commands = [
+    {
+        name: 'level',
+        description: 'View your or another user\'s level',
+        options: [
+            {
+                name: 'user',
+                description: 'The user to check the level of',
+                type: 6, // USER type
+                required: false
+            }
+        ]
+    },
+    {
+        name: 'leaderboard',
+        description: 'View the server\'s top 10 members by level'
+    },
     {
         name: 'punish',
         description: 'Open the moderation menu for a user',
@@ -889,6 +971,61 @@ client.on('interactionCreate', async interaction => {
             await interaction.deferReply({ ephemeral: true });
             await targetChannel.send({ embeds: [GUIDE_PAGES[0]], components: getGuideComponents(0) });
             return interaction.editReply('Guide sent successfully!');
+        }
+        else if (interaction.commandName === 'level') {
+            const targetUser = interaction.options.getUser('user') || interaction.user;
+            const levels = loadLevels();
+            
+            const userData = levels[targetUser.id] || { xp: 0, level: 0, totalXp: 0 };
+            const reqXp = getXpForNextLevel(userData.level);
+            
+            // Calculate Rank
+            const sortedUsers = Object.entries(levels).sort((a, b) => b[1].totalXp - a[1].totalXp);
+            const rankIndex = sortedUsers.findIndex(([id]) => id === targetUser.id);
+            const rank = rankIndex === -1 ? 'Unranked' : `#${rankIndex + 1}`;
+            
+            const progressBar = generateProgressBar(userData.xp, reqXp, 15);
+            
+            const embed = new EmbedBuilder()
+                .setTitle(`${targetUser.username}'s Level Stats`)
+                .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+                .setColor('#2ecc71')
+                .addFields(
+                    { name: 'Level', value: `**${userData.level}**`, inline: true },
+                    { name: 'Rank', value: `**${rank}**`, inline: true },
+                    { name: 'Total XP', value: `**${userData.totalXp}**`, inline: true },
+                    { name: `Progress to Level ${userData.level + 1}`, value: `\`${progressBar}\`\n(${userData.xp} / ${reqXp} XP)` }
+                );
+                
+            return interaction.reply({ embeds: [embed] });
+        }
+        else if (interaction.commandName === 'leaderboard') {
+            const levels = loadLevels();
+            const sortedUsers = Object.entries(levels)
+                .sort((a, b) => b[1].totalXp - a[1].totalXp)
+                .slice(0, 10);
+                
+            if (sortedUsers.length === 0) {
+                return interaction.reply({ content: 'No one has earned any XP yet!', ephemeral: true });
+            }
+            
+            let description = '';
+            sortedUsers.forEach(([id, data], index) => {
+                let medal = '🏅';
+                if (index === 0) medal = '🥇';
+                if (index === 1) medal = '🥈';
+                if (index === 2) medal = '🥉';
+                
+                description += `${medal} **#${index + 1}** <@${id}> - **Level ${data.level}** (${data.totalXp} XP)\n`;
+            });
+            
+            const embed = new EmbedBuilder()
+                .setTitle('🏆 Server Leaderboard 🏆')
+                .setDescription(description)
+                .setColor('#FFD700')
+                .setTimestamp();
+                
+            return interaction.reply({ embeds: [embed] });
         }
         else if (interaction.commandName === 'testwelcome') {
             if (!interaction.member.permissions.has('ModerateMembers') && !interaction.member.roles.cache.has('1261617213325049936')) {
