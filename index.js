@@ -1665,7 +1665,7 @@ client.on('interactionCreate', async interaction => {
             
             const ticketType = parts[1];
             let detailsEmbed = new EmbedBuilder().setColor('#2F3136');
-            let contentMsg = `<@${interaction.user.id}> <@&1373246947732885684> Welcome, support will be with you shortly.\n**Staff has been notified, Please Wait**`;
+            let contentMsg = `<@${interaction.user.id}> Welcome, support will be with you shortly.\n**Staff has been notified, Please Wait** ||<@&1373246947732885684>||`;
 
             if (ticketType === 'general') {
                 const reason = interaction.fields.getTextInputValue('reason').substring(0, 1000);
