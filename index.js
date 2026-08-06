@@ -383,8 +383,17 @@ client.on('messageCreate', async message => {
                 }
             } else {
                 // Just a normal chat reply
-                const replyContent = responseMessage?.content || "Sorry, I couldn't think of a response!";
-                await message.reply(replyContent);
+                let replyContent = responseMessage?.content || "Sorry, I couldn't think of a response!";
+                
+                // Prevent prompt-injected command execution (prefix a zero-width space if it starts with a command prefix)
+                if (/^[?!/.\-]/.test(replyContent)) {
+                    replyContent = '\u200B' + replyContent;
+                }
+
+                await message.reply({ 
+                    content: replyContent, 
+                    allowedMentions: { parse: [], repliedUser: true } 
+                });
             }
         } catch (error) {
             console.error("Error with Groq API:", error);
