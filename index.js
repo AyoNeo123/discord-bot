@@ -556,7 +556,7 @@ function getGuideComponents(pageIndex) {
 // --- SLASH COMMAND REGISTRATION ---
 const commands = [
     {
-        name: 'level',
+        name: 'levels',
         description: 'View your or another user\'s level',
         options: [
             {
@@ -570,6 +570,42 @@ const commands = [
     {
         name: 'leaderboard',
         description: 'View the server\'s top 10 members by level'
+    },
+    {
+        name: 'leveltransfer',
+        description: 'Transfer all XP and levels from one user to another (Admin only)',
+        options: [
+            {
+                name: 'source',
+                description: 'The user to take XP from',
+                type: 6, // USER type
+                required: true
+            },
+            {
+                name: 'target',
+                description: 'The user to give the XP to',
+                type: 6, // USER type
+                required: true
+            }
+        ]
+    },
+    {
+        name: 'leveladd',
+        description: 'Add a specific number of levels to a user (Admin only)',
+        options: [
+            {
+                name: 'user',
+                description: 'The user to give levels to',
+                type: 6, // USER type
+                required: true
+            },
+            {
+                name: 'amount',
+                description: 'The number of levels to add',
+                type: 4, // INTEGER type
+                required: true
+            }
+        ]
     },
     {
         name: 'punish',
@@ -972,7 +1008,7 @@ client.on('interactionCreate', async interaction => {
             await targetChannel.send({ embeds: [GUIDE_PAGES[0]], components: getGuideComponents(0) });
             return interaction.editReply('Guide sent successfully!');
         }
-        else if (interaction.commandName === 'level') {
+        else if (interaction.commandName === 'levels') {
             const targetUser = interaction.options.getUser('user') || interaction.user;
             const levels = loadLevels();
             
@@ -1026,6 +1062,88 @@ client.on('interactionCreate', async interaction => {
                 .setTimestamp();
                 
             return interaction.reply({ embeds: [embed] });
+        }
+        else if (interaction.commandName === 'leveltransfer') {
+            if (!interaction.member.permissions.has('ModerateMembers') && !interaction.member.roles.cache.has('1261617213325049936')) {
+                return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+            }
+
+            const sourceUser = interaction.options.getUser('source');
+            const targetUser = interaction.options.getUser('target');
+            
+            if (sourceUser.id === targetUser.id) {
+                return interaction.reply({ content: 'You cannot transfer levels to the same user!', ephemeral: true });
+            }
+            
+            const levels = loadLevels();
+            
+            if (!levels[sourceUser.id] || levels[sourceUser.id].totalXp === 0) {
+                return interaction.reply({ content: `<@${sourceUser.id}> does not have any XP to transfer.`, ephemeral: true });
+            }
+            
+            const sourceTotalXp = levels[sourceUser.id].totalXp;
+            
+            if (!levels[targetUser.id]) {
+                levels[targetUser.id] = { xp: 0, level: 0, totalXp: 0 };
+            }
+            
+            // Add source XP to target
+            levels[targetUser.id].totalXp += sourceTotalXp;
+            levels[targetUser.id].xp += sourceTotalXp;
+            
+            // Recalculate target level
+            while (true) {
+                const reqXp = getXpForNextLevel(levels[targetUser.id].level);
+                if (levels[targetUser.id].xp >= reqXp) {
+                    levels[targetUser.id].xp -= reqXp;
+                    levels[targetUser.id].level += 1;
+                } else {
+                    break;
+                }
+            }
+            
+            // Delete source user stats
+            delete levels[sourceUser.id];
+            
+            saveLevels(levels);
+            
+            return interaction.reply({ content: `Successfully transferred **${sourceTotalXp} XP** from <@${sourceUser.id}> to <@${targetUser.id}>! <@${targetUser.id}> is now **Level ${levels[targetUser.id].level}**.` });
+        }
+        else if (interaction.commandName === 'leveladd') {
+            if (!interaction.member.permissions.has('ModerateMembers') && !interaction.member.roles.cache.has('1261617213325049936')) {
+                return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+            }
+
+            const targetUser = interaction.options.getUser('user');
+            const levelsToAdd = interaction.options.getInteger('amount');
+            
+            if (levelsToAdd <= 0) {
+                return interaction.reply({ content: 'You must add at least 1 level.', ephemeral: true });
+            }
+            
+            const levels = loadLevels();
+            
+            if (!levels[targetUser.id]) {
+                levels[targetUser.id] = { xp: 0, level: 0, totalXp: 0 };
+            }
+            
+            const currentLevel = levels[targetUser.id].level;
+            const targetLevel = currentLevel + levelsToAdd;
+            
+            // Calculate how much total XP is needed to reach targetLevel exactly at 0 progress
+            let targetTotalXp = 0;
+            for (let l = 0; l < targetLevel; l++) {
+                targetTotalXp += 5 * Math.pow(l, 2) + 50 * l + 100;
+            }
+            
+            // Adjust their stats
+            levels[targetUser.id].totalXp = targetTotalXp;
+            levels[targetUser.id].level = targetLevel;
+            levels[targetUser.id].xp = 0; // Exactly at the start of the new level
+            
+            saveLevels(levels);
+            
+            return interaction.reply({ content: `Successfully added **${levelsToAdd} levels** to <@${targetUser.id}>! They are now **Level ${targetLevel}**.` });
         }
         else if (interaction.commandName === 'testwelcome') {
             if (!interaction.member.permissions.has('ModerateMembers') && !interaction.member.roles.cache.has('1261617213325049936')) {
