@@ -1878,6 +1878,26 @@ client.on('interactionCreate', async interaction => {
                 const message = interaction.options.getString('message');
                 try {
                     await targetChannel.send({ content: message });
+                    
+                    // Log the announcement
+                    try {
+                        const logChannel = await interaction.client.channels.fetch('1397224306702024828').catch(() => null);
+                        if (logChannel && logChannel.isTextBased()) {
+                            const logEmbed = new EmbedBuilder()
+                                .setTitle('📢 Announcement Sent')
+                                .setColor('#3498db')
+                                .addFields(
+                                    { name: 'Staff Member', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
+                                    { name: 'Target Channel', value: `<#${targetChannel.id}>`, inline: true },
+                                    { name: 'Message', value: message.length > 1024 ? message.substring(0, 1021) + '...' : message }
+                                )
+                                .setTimestamp();
+                            await logChannel.send({ embeds: [logEmbed] });
+                        }
+                    } catch (logErr) {
+                        console.error('Failed to log announcement:', logErr);
+                    }
+
                     return interaction.reply({ content: `✅ Announcement sent to ${targetChannel}.`, ephemeral: true });
                 } catch (e) {
                     return interaction.reply({ content: `Failed to send announcement: ${e.message}`, ephemeral: true });
@@ -2856,6 +2876,26 @@ client.on('interactionCreate', async interaction => {
             try {
                 const targetUser = await client.users.fetch(targetId);
                 await targetUser.send(`**Reply from Staff:**\n${replyText}`);
+                
+                // Log the DM
+                try {
+                    const logChannel = await interaction.client.channels.fetch('1397224306702024828').catch(() => null);
+                    if (logChannel && logChannel.isTextBased()) {
+                        const logEmbed = new EmbedBuilder()
+                            .setTitle('✉️ Staff DM Sent (Reply)')
+                            .setColor('#e67e22')
+                            .addFields(
+                                { name: 'Staff Member', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
+                                { name: 'Recipient', value: `<@${targetId}>`, inline: true },
+                                { name: 'Message', value: replyText.length > 1024 ? replyText.substring(0, 1021) + '...' : replyText }
+                            )
+                            .setTimestamp();
+                        await logChannel.send({ embeds: [logEmbed] });
+                    }
+                } catch (logErr) {
+                    console.error('Failed to log DM:', logErr);
+                }
+
                 return interaction.editReply(`Successfully sent reply to <@${targetId}>.`);
             } catch (err) {
                 console.error("DM Reply error:", err);
@@ -2872,6 +2912,26 @@ client.on('interactionCreate', async interaction => {
             try {
                 const targetUser = await client.users.fetch(targetId);
                 await targetUser.send(`**Message from Staff:**\n${dmText}`);
+
+                // Log the DM
+                try {
+                    const logChannel = await interaction.client.channels.fetch('1397224306702024828').catch(() => null);
+                    if (logChannel && logChannel.isTextBased()) {
+                        const logEmbed = new EmbedBuilder()
+                            .setTitle('✉️ Staff DM Sent')
+                            .setColor('#e67e22')
+                            .addFields(
+                                { name: 'Staff Member', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
+                                { name: 'Recipient', value: `<@${targetId}>`, inline: true },
+                                { name: 'Message', value: dmText.length > 1024 ? dmText.substring(0, 1021) + '...' : dmText }
+                            )
+                            .setTimestamp();
+                        await logChannel.send({ embeds: [logEmbed] });
+                    }
+                } catch (logErr) {
+                    console.error('Failed to log DM:', logErr);
+                }
+
                 return interaction.editReply(`Successfully sent DM to <@${targetId}>.`);
             } catch (err) {
                 console.error("Manage DM error:", err);
