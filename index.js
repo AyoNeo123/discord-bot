@@ -2231,9 +2231,11 @@ client.on('interactionCreate', async interaction => {
                 const overwrites = interaction.channel.permissionOverwrites.cache;
                 for (const [id, overwrite] of overwrites) {
                     if (overwrite.type === 1) { // 1 = Member (User)
-                        await interaction.channel.permissionOverwrites.delete(id);
+                        await interaction.channel.permissionOverwrites.edit(id, { SendMessages: false, ViewChannel: true });
                     }
                 }
+                // Ensure no one else can send messages by default
+                await interaction.channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: false });
 
                 const closedRow = new ActionRowBuilder();
                 if (interaction.message && interaction.message.components && interaction.message.components.length > 0) {
