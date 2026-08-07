@@ -439,7 +439,7 @@ client.on('messageCreate', async message => {
             const chatMessages = [
                 {
                     role: "system",
-                    content: "You are a helpful Discord bot. You have access to moderation tools (ban, kick, timeout, roles, clear messages, lock channels) which you can execute when the user instructs you to. Always respond politely. Only output the tool call if instructed to do an action."
+                    content: "You are a helpful Discord bot. " + (isAdmin ? "You have access to moderation tools (ban, kick, timeout, roles, clear messages, lock channels) which you can execute when the user instructs you to. Only output the tool call if instructed to do an action." : "Keep your answers concise and conversational. Do not list admin or moderation commands since this user does not have permission to use them.") + " Always respond politely."
                 },
                 {
                     role: "user",
@@ -2231,11 +2231,12 @@ client.on('interactionCreate', async interaction => {
                 const overwrites = interaction.channel.permissionOverwrites.cache;
                 for (const [id, overwrite] of overwrites) {
                     if (overwrite.type === 1) { // 1 = Member (User)
-                        await interaction.channel.permissionOverwrites.edit(id, { SendMessages: false, ViewChannel: true });
+                        await interaction.channel.permissionOverwrites.delete(id);
                     }
                 }
-                // Ensure no one else can send messages by default
+                // Ensure no one else can send messages by default (except admins, but staff role is denied)
                 await interaction.channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: false });
+                await interaction.channel.permissionOverwrites.edit(TICKET_STAFF_ROLE_ID, { SendMessages: false });
 
                 const closedRow = new ActionRowBuilder();
                 if (interaction.message && interaction.message.components && interaction.message.components.length > 0) {
