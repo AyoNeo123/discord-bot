@@ -146,8 +146,8 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.DirectMessages
-        // GatewayIntentBits.GuildMembers // REQUIRES INTENT ENABLED ON DISCORD PORTAL
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildMembers // WARNING: REQUIRES INTENT ENABLED ON DISCORD PORTAL
     ],
     partials: [Partials.Channel]
 });
@@ -2979,6 +2979,16 @@ client.on('interactionCreate', async interaction => {
 
 // --- WELCOME EVENT ---
 client.on('guildMemberAdd', async member => {
+    // 1. Auto-Role
+    try {
+        const autoRoleId = '1322867157733740564';
+        await member.roles.add(autoRoleId);
+        console.log(`Assigned auto-role to new member: ${member.user.tag}`);
+    } catch (e) {
+        console.error(`Failed to assign auto-role to ${member.user.tag}:`, e);
+    }
+
+    // 2. Welcome Message
     if (WELCOME_CHANNEL_ID === 'PLACEHOLDER') return;
     
     try {
