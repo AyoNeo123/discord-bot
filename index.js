@@ -152,6 +152,8 @@ const client = new Client({
     partials: [Partials.Channel]
 });
 
+client.on('debug', console.log);
+
 // When the client is ready, run this code (only once)
 client.once('ready', () => {
     console.log(`Ready! Logged in as ${client.user.tag}`);
