@@ -146,8 +146,8 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.DirectMessages
-        // GatewayIntentBits.GuildMembers // WARNING: REQUIRES INTENT ENABLED ON DISCORD PORTAL
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildMembers // WARNING: REQUIRES INTENT ENABLED ON DISCORD PORTAL
     ],
     partials: [Partials.Channel]
 });
