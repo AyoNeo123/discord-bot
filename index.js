@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('node:dns').setDefaultResultOrder('ipv4first');
 const { Client, GatewayIntentBits, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, Partials, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ChannelType, PermissionFlagsBits, UserSelectMenuBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
