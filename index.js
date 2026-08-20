@@ -669,7 +669,7 @@ client.on('messageCreate', async message => {
         } else {
             // Warn them
             warnings.set(userId, now);
-            message.channel.send(`<@${userId}>, please do not ping that user! If you need help, please ping <@&${HELP_ROLE_ID}> instead.`);
+            message.channel.send(`<@${userId}>, please do not ping that user!`);
         }
 
         // Stop processing this message further
