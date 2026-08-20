@@ -452,7 +452,7 @@ client.on('messageCreate', async message => {
 
             const chatCompletion = await groq.chat.completions.create({
                 messages: chatMessages,
-                model: "llama-3.3-70b-versatile",
+                model: "openai/gpt-oss-20b",
                 tools: tools,
                 tool_choice: "auto",
             });
@@ -734,7 +734,7 @@ client.on('messageCreate', async message => {
                     {role: "system", content: "Reply 'YES' if the user is asking about the Bunji stream schedule or when Bunji streams, otherwise reply 'NO'. Answer strictly with YES or NO."}, 
                     {role: "user", content: message.content}
                 ],
-                model: "llama-3.3-70b-versatile",
+                model: "openai/gpt-oss-20b",
                 temperature: 0,
                 max_tokens: 5
             });
