@@ -128,7 +128,7 @@ async function buildStaffPanelPayload(channel) {
             `• **Creator:** ${creatorId ? `<@${creatorId}>` : '*Unknown*'}\n` +
             `• **Status:** ${isOnHold ? '⏸️ **On Hold** (Messaging paused)' : '🟢 **Active**'}\n` +
             `• **Claimed By:** ${claimerId ? `<@${claimerId}>` : '*Unclaimed*'}\n\n` +
-            `*Use the menus below to execute staff actions or manage ticket members.*`
+            `*Use the menu below to execute staff actions.*`
         )
         .setColor(isOnHold ? '#f39c12' : '#2F3136')
         .setFooter({ text: 'BunjiBot Ticket System • Staff Only' });
@@ -178,15 +178,7 @@ async function buildStaffPanelPayload(channel) {
 
     const row1 = new ActionRowBuilder().addComponents(actionMenu);
 
-    const addMemberButton = new ButtonBuilder()
-        .setCustomId('ticket_btn_addmember')
-        .setLabel('Add Member by Name or ID')
-        .setStyle(ButtonStyle.Primary)
-        .setEmoji('👤');
-
-    const row2 = new ActionRowBuilder().addComponents(addMemberButton);
-
-    return { embeds: [embed], components: [row1, row2] };
+    return { embeds: [embed], components: [row1] };
 }
 
 async function getTicketCreatorId(channel) {
