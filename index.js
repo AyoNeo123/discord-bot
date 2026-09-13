@@ -1,6 +1,6 @@
 require('dotenv').config();
 require('node:dns').setDefaultResultOrder('ipv4first');
-const { Client, GatewayIntentBits, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, Partials, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ChannelType, PermissionFlagsBits, UserSelectMenuBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, Partials, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ChannelType, PermissionFlagsBits, UserSelectMenuBuilder, RoleSelectMenuBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 const ms = require('ms');
@@ -96,6 +96,29 @@ function getNextTicketNumber(type) {
     
     return String(counts[type]).padStart(4, '0');
 }
+
+async function getTicketCreatorId(channel) {
+    if (channel.topic) {
+        const match = channel.topic.match(/Creator:\s*(\d+)/i);
+        if (match) return match[1];
+    }
+    const overwrites = channel.permissionOverwrites.cache;
+    for (const [id, overwrite] of overwrites) {
+        if (overwrite.type === 1 && id !== channel.client.user.id) {
+            return id;
+        }
+    }
+    try {
+        const messages = await channel.messages.fetch({ limit: 10, after: '0' });
+        const firstBotMsg = messages.reverse().find(m => m.author.id === channel.client.user.id && m.content.includes('<@'));
+        if (firstBotMsg) {
+            const match = firstBotMsg.content.match(/<@(\d+)>/);
+            if (match) return match[1];
+        }
+    } catch (e) {}
+    return null;
+}
+
 
 // --- GIVEAWAY HELPERS ---
 const GIVEAWAYS_FILE = path.join(__dirname, 'giveaways.json');
@@ -2195,6 +2218,72 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
+    // 2.6 Role Select Menus
+    else if ((interaction.isRoleSelectMenu && interaction.isRoleSelectMenu()) || (interaction.isAnySelectMenu && interaction.isAnySelectMenu() && interaction.customId.startsWith('ticket_selectrole_'))) {
+        if (interaction.customId.startsWith('ticket_selectrole_')) {
+            if (!interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID) && !interaction.member.permissions.has('ModerateMembers')) {
+                return interaction.reply({ content: 'You do not have permission to assign roles in tickets.', ephemeral: true });
+            }
+
+            const targetUserId = interaction.customId.replace('ticket_selectrole_', '');
+            const roleId = interaction.values[0];
+
+            await interaction.deferReply({ ephemeral: true });
+
+            try {
+                const member = await interaction.guild.members.fetch(targetUserId).catch(() => null);
+                if (!member) {
+                    return interaction.editReply({ content: 'Target user could not be found in this server.' });
+                }
+
+                const role = await interaction.guild.roles.fetch(roleId).catch(() => null);
+                if (!role) {
+                    return interaction.editReply({ content: 'The selected role could not be found.' });
+                }
+
+                const botMember = interaction.guild.members.me;
+                if (role.comparePositionTo(botMember.roles.highest) >= 0) {
+                    return interaction.editReply({ content: `I cannot assign the role **${role.name}** because it is equal to or higher than my highest role.` });
+                }
+
+                if (role.comparePositionTo(interaction.member.roles.highest) >= 0 && interaction.guild.ownerId !== interaction.user.id) {
+                    return interaction.editReply({ content: `You cannot assign the role **${role.name}** because it is equal to or higher than your highest role.` });
+                }
+
+                if (member.roles.cache.has(role.id)) {
+                    return interaction.editReply({ content: `<@${targetUserId}> already has the **${role.name}** role.` });
+                }
+
+                await member.roles.add(role.id);
+
+                await interaction.editReply({ content: `Successfully assigned **${role.name}** to <@${targetUserId}>!` });
+
+                const roleAnnounceEmbed = new EmbedBuilder()
+                    .setTitle('Role Assigned 🏷️')
+                    .setDescription(`Staff member <@${interaction.user.id}> assigned the **${role.name}** role to <@${targetUserId}>.`)
+                    .setColor('#2ecc71')
+                    .setTimestamp();
+                await interaction.channel.send({ embeds: [roleAnnounceEmbed] });
+
+                const logEmbed = new EmbedBuilder()
+                    .setTitle('Ticket Role Added')
+                    .addFields(
+                        { name: 'Ticket', value: `<#${interaction.channel.id}>`, inline: true },
+                        { name: 'User', value: `<@${targetUserId}>`, inline: true },
+                        { name: 'Role Added', value: `${role.name} (\`${role.id}\`)`, inline: true },
+                        { name: 'Staff Member', value: `<@${interaction.user.id}>`, inline: true }
+                    )
+                    .setColor('#2ecc71')
+                    .setTimestamp();
+                sendLog(TICKET_LOG_CHANNEL, logEmbed);
+
+            } catch (err) {
+                console.error('Error adding role in ticket:', err);
+                return interaction.editReply({ content: `Failed to assign role: ${err.message}` });
+            }
+        }
+    }
+
     // 3. Buttons
     else if (interaction.isButton()) {
         const parts = interaction.customId.split('_');
@@ -2299,25 +2388,37 @@ client.on('interactionCreate', async interaction => {
                     return interaction.reply({ content: 'You do not have permission to use the Staff Panel.', ephemeral: true });
                 }
 
+                const creatorId = await getTicketCreatorId(interaction.channel);
+                const creatorOverwrite = creatorId ? interaction.channel.permissionOverwrites.cache.get(creatorId) : null;
+                const isOnHold = creatorOverwrite ? creatorOverwrite.deny.has(PermissionFlagsBits.SendMessages) : false;
+
                 const embed = new EmbedBuilder()
-                    .setDescription(`\`Claim ticket\` - Announce you will handle this ticket\n\`Hold ticket\` - Announces ticket is on hold and will be dealt with later\n\`Silent Delete\` - Instant deletion of the ticket (no warning)\n\`Delete Ticket\` - Prompts for confirmation then deletes in 10s\n\`Add to ticket\` - Add anyone from the drop down below`)
+                    .setDescription(`\`Claim ticket\` - Announce you will handle this ticket\n\`${isOnHold ? 'Remove hold' : 'Put on hold'}\` - ${isOnHold ? 'Resume ticket and restore member messaging' : 'Announce ticket is on hold and pause member messaging'}\n\`Add Role\` - Assign a role to the ticket creator\n\`Create Voice Channel\` - Private voice channel for this ticket\n\`Delete Ticket\` - Prompts for confirmation then deletes in 10s\n\`Silent Delete\` - Instant deletion of the ticket (no warning)\n\`Add to ticket\` - Add anyone from the drop down below`)
                     .setColor('#2F3136');
+
+                const holdButton = isOnHold
+                    ? new ButtonBuilder().setCustomId('ticket_unhold').setLabel('Remove hold').setStyle(ButtonStyle.Success).setEmoji('▶️')
+                    : new ButtonBuilder().setCustomId('ticket_hold').setLabel('Put on hold').setStyle(ButtonStyle.Primary).setEmoji('⏸️');
 
                 const row1 = new ActionRowBuilder().addComponents(
                     new ButtonBuilder().setCustomId('ticket_claim').setLabel('Claim ticket').setStyle(ButtonStyle.Success),
-                    new ButtonBuilder().setCustomId('ticket_hold').setLabel('Put on hold').setStyle(ButtonStyle.Primary),
-                    new ButtonBuilder().setCustomId('ticket_silentdelete').setLabel('Silent Delete').setStyle(ButtonStyle.Danger),
-                    new ButtonBuilder().setCustomId('ticket_delete').setLabel('Delete Ticket').setStyle(ButtonStyle.Secondary),
+                    holdButton,
+                    new ButtonBuilder().setCustomId('ticket_addrole').setLabel('Add Role').setStyle(ButtonStyle.Secondary).setEmoji('🏷️'),
                     new ButtonBuilder().setCustomId('ticket_vc').setLabel('Create Voice Channel').setStyle(ButtonStyle.Primary).setEmoji('🎤')
                 );
 
                 const row2 = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId('ticket_delete').setLabel('Delete Ticket').setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder().setCustomId('ticket_silentdelete').setLabel('Silent Delete').setStyle(ButtonStyle.Danger)
+                );
+
+                const row3 = new ActionRowBuilder().addComponents(
                     new UserSelectMenuBuilder()
                         .setCustomId('ticket_adduser')
                         .setPlaceholder('Select someone to add to the ticket')
                 );
 
-                return interaction.reply({ embeds: [embed], components: [row1, row2], ephemeral: true });
+                return interaction.reply({ embeds: [embed], components: [row1, row2, row3], ephemeral: true });
             }
             else if (action === 'claim') {
                 if (!interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID) && !interaction.member.permissions.has('ModerateMembers')) {
@@ -2352,7 +2453,7 @@ client.on('interactionCreate', async interaction => {
                 }
                 
                 if (interaction.message && interaction.message.components && interaction.message.components.length > 1) {
-                    return interaction.update({ components: [updatedRow, interaction.message.components[1]] });
+                    return interaction.update({ components: [updatedRow, ...interaction.message.components.slice(1)] });
                 } else if (updatedRow.components.length > 0) {
                     return interaction.update({ components: [updatedRow] });
                 } else {
@@ -2363,9 +2464,15 @@ client.on('interactionCreate', async interaction => {
                 if (!interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID) && !interaction.member.permissions.has('ModerateMembers')) {
                     return interaction.reply({ content: 'You do not have permission.', ephemeral: true });
                 }
+
+                const creatorId = await getTicketCreatorId(interaction.channel);
+                if (creatorId) {
+                    await interaction.channel.permissionOverwrites.edit(creatorId, { SendMessages: false }).catch(console.error);
+                }
+
                 const holdEmbed = new EmbedBuilder()
                     .setTitle('Ticket On Hold ⏸️')
-                    .setDescription(`This ticket has been placed on hold by <@${interaction.user.id}> and will be dealt with later.`)
+                    .setDescription(`This ticket has been placed on hold by <@${interaction.user.id}> and will be dealt with later.${creatorId ? `\n\n*<@${creatorId}>'s permission to send messages has been paused.*` : ''}`)
                     .setColor('#3498db');
                     
                 const logEmbed = new EmbedBuilder()
@@ -2378,7 +2485,110 @@ client.on('interactionCreate', async interaction => {
                     .setColor('#3498db');
                 sendLog(TICKET_LOG_CHANNEL, logEmbed);
                 
-                return interaction.reply({ embeds: [holdEmbed] });
+                await interaction.channel.send({ embeds: [holdEmbed] });
+
+                if (interaction.message && interaction.message.components) {
+                    const newRows = interaction.message.components.map(row => {
+                        const newRow = new ActionRowBuilder();
+                        row.components.forEach(comp => {
+                            if (comp.customId === 'ticket_hold') {
+                                newRow.addComponents(new ButtonBuilder().setCustomId('ticket_unhold').setLabel('Remove hold').setStyle(ButtonStyle.Success).setEmoji('▶️'));
+                            } else {
+                                if (comp.type === 2) {
+                                    newRow.addComponents(ButtonBuilder.from(comp));
+                                } else if (comp.type === 5) {
+                                    newRow.addComponents(UserSelectMenuBuilder.from(comp));
+                                } else {
+                                    newRow.addComponents(comp);
+                                }
+                            }
+                        });
+                        return newRow;
+                    });
+                    return interaction.update({ components: newRows });
+                } else {
+                    return interaction.reply({ content: 'Ticket placed on hold.', ephemeral: true });
+                }
+            }
+            else if (action === 'unhold') {
+                if (!interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID) && !interaction.member.permissions.has('ModerateMembers')) {
+                    return interaction.reply({ content: 'You do not have permission.', ephemeral: true });
+                }
+
+                const creatorId = await getTicketCreatorId(interaction.channel);
+                if (creatorId) {
+                    await interaction.channel.permissionOverwrites.edit(creatorId, { SendMessages: true }).catch(console.error);
+                }
+
+                const unholdEmbed = new EmbedBuilder()
+                    .setTitle('Ticket Resumed ▶️')
+                    .setDescription(`This ticket has been taken off hold by <@${interaction.user.id}>.${creatorId ? `\n\n*<@${creatorId}> can now send messages again.*` : ''}`)
+                    .setColor('#2ecc71');
+                    
+                const logEmbed = new EmbedBuilder()
+                    .setTitle('Ticket Removed From Hold')
+                    .addFields(
+                        { name: 'Ticket', value: `<#${interaction.channel.id}>`, inline: true },
+                        { name: 'Unhold By', value: `<@${interaction.user.id}>`, inline: true }
+                    )
+                    .setTimestamp()
+                    .setColor('#2ecc71');
+                sendLog(TICKET_LOG_CHANNEL, logEmbed);
+
+                await interaction.channel.send({ embeds: [unholdEmbed] });
+
+                if (interaction.message && interaction.message.components) {
+                    const newRows = interaction.message.components.map(row => {
+                        const newRow = new ActionRowBuilder();
+                        row.components.forEach(comp => {
+                            if (comp.customId === 'ticket_unhold') {
+                                newRow.addComponents(new ButtonBuilder().setCustomId('ticket_hold').setLabel('Put on hold').setStyle(ButtonStyle.Primary).setEmoji('⏸️'));
+                            } else {
+                                if (comp.type === 2) {
+                                    newRow.addComponents(ButtonBuilder.from(comp));
+                                } else if (comp.type === 5) {
+                                    newRow.addComponents(UserSelectMenuBuilder.from(comp));
+                                } else {
+                                    newRow.addComponents(comp);
+                                }
+                            }
+                        });
+                        return newRow;
+                    });
+                    return interaction.update({ components: newRows });
+                } else {
+                    return interaction.reply({ content: 'Ticket hold removed.', ephemeral: true });
+                }
+            }
+            else if (action === 'addrole') {
+                if (!interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID) && !interaction.member.permissions.has('ModerateMembers')) {
+                    return interaction.reply({ content: 'You do not have permission to add roles.', ephemeral: true });
+                }
+
+                const creatorId = await getTicketCreatorId(interaction.channel);
+                if (!creatorId) {
+                    return interaction.reply({ content: 'Could not determine the ticket creator for this channel.', ephemeral: true });
+                }
+
+                const member = await interaction.guild.members.fetch(creatorId).catch(() => null);
+                if (!member) {
+                    return interaction.reply({ content: `Could not find member <@${creatorId}> in this server.`, ephemeral: true });
+                }
+
+                const roleSelectMenu = new RoleSelectMenuBuilder()
+                    .setCustomId(`ticket_selectrole_${creatorId}`)
+                    .setPlaceholder(`Select a role to assign to ${member.user.username}`)
+                    .setMinValues(1)
+                    .setMaxValues(1);
+
+                const roleRow = new ActionRowBuilder().addComponents(roleSelectMenu);
+
+                const roleEmbed = new EmbedBuilder()
+                    .setTitle('Assign Role to Ticket Creator 🏷️')
+                    .setDescription(`Select a role from the dropdown below to assign to <@${creatorId}>:`)
+                    .setColor('#3498db');
+
+                return interaction.reply({ embeds: [roleEmbed], components: [roleRow], ephemeral: true });
             }
             else if (action === 'delete') {
                 if (!interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID) && !interaction.member.permissions.has('ModerateMembers')) {
@@ -2826,6 +3036,7 @@ client.on('interactionCreate', async interaction => {
                     name: `${ticketType}-${getNextTicketNumber(ticketType)}`,
                     type: ChannelType.GuildText,
                     parent: TICKET_CATEGORY_ID,
+                    topic: `Ticket Creator: ${interaction.user.id}`,
                     permissionOverwrites: [
                         {
                             id: interaction.guild.roles.everyone,
