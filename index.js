@@ -145,6 +145,11 @@ async function buildStaffPanelPayload(channel) {
             .setDescription(isOnHold ? 'Resume ticket and restore member messaging' : 'Pause ticket and restrict member messaging')
             .setEmoji(isOnHold ? '▶️' : '⏸️'),
         new StringSelectMenuOptionBuilder()
+            .setValue('addmember')
+            .setLabel('Add Member to Ticket')
+            .setDescription('Enter a username or ID to add them to this ticket')
+            .setEmoji('👤'),
+        new StringSelectMenuOptionBuilder()
             .setValue('addrole')
             .setLabel('Assign Role to Creator')
             .setDescription('Select and grant a server role to the ticket creator')
@@ -173,11 +178,13 @@ async function buildStaffPanelPayload(channel) {
 
     const row1 = new ActionRowBuilder().addComponents(actionMenu);
 
-    const userSelectMenu = new UserSelectMenuBuilder()
-        .setCustomId('ticket_adduser')
-        .setPlaceholder('👤 Select someone to add to this ticket...');
+    const addMemberButton = new ButtonBuilder()
+        .setCustomId('ticket_btn_addmember')
+        .setLabel('Add Member by Name or ID')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('👤');
 
-    const row2 = new ActionRowBuilder().addComponents(userSelectMenu);
+    const row2 = new ActionRowBuilder().addComponents(addMemberButton);
 
     return { embeds: [embed], components: [row1, row2] };
 }
@@ -2194,6 +2201,21 @@ client.on('interactionCreate', async interaction => {
                 const panelData = await buildStaffPanelPayload(interaction.channel);
                 return interaction.update(panelData);
             }
+            else if (selected === 'addmember') {
+                const modal = new ModalBuilder()
+                    .setCustomId('modal_ticket_addmember')
+                    .setTitle('Add Member to Ticket');
+
+                const input = new TextInputBuilder()
+                    .setCustomId('user_identifier')
+                    .setLabel('Member Name or User ID')
+                    .setPlaceholder('Enter username, display name, or numeric ID')
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
+
+                modal.addComponents(new ActionRowBuilder().addComponents(input));
+                return interaction.showModal(modal);
+            }
             else if (selected === 'addrole') {
                 const creatorId = await getTicketCreatorId(interaction.channel);
                 if (!creatorId) {
@@ -2568,6 +2590,25 @@ client.on('interactionCreate', async interaction => {
 
     // 3. Buttons
     else if (interaction.isButton()) {
+        if (interaction.customId === 'ticket_btn_addmember') {
+            if (!interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID) && !interaction.member.permissions.has('ModerateMembers')) {
+                return interaction.reply({ content: 'You do not have permission to add users to this ticket.', ephemeral: true });
+            }
+
+            const modal = new ModalBuilder()
+                .setCustomId('modal_ticket_addmember')
+                .setTitle('Add Member to Ticket');
+
+            const input = new TextInputBuilder()
+                .setCustomId('user_identifier')
+                .setLabel('Member Name or User ID')
+                .setPlaceholder('Enter username, display name, or numeric ID')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+            return interaction.showModal(modal);
+        }
         const parts = interaction.customId.split('_');
 
         if (parts[0] === 'guide') {
@@ -3172,6 +3213,82 @@ client.on('interactionCreate', async interaction => {
 
     // 4. Modals
     else if (interaction.isModalSubmit()) {
+        if (interaction.customId === 'modal_ticket_addmember') {
+            if (!interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID) && !interaction.member.permissions.has('ModerateMembers')) {
+                return interaction.reply({ content: 'You do not have permission to add users to this ticket.', ephemeral: true });
+            }
+
+            const rawInput = interaction.fields.getTextInputValue('user_identifier').trim();
+            await interaction.deferReply({ ephemeral: true });
+
+            try {
+                let targetMember = null;
+
+                // 1. Try numeric ID or mention
+                const cleanId = rawInput.replace(/[^0-9]/g, '');
+                if (cleanId.length >= 17 && cleanId.length <= 20) {
+                    targetMember = await interaction.guild.members.fetch(cleanId).catch(() => null);
+                }
+
+                // 2. Search guild members by query
+                if (!targetMember) {
+                    const searchResults = await interaction.guild.members.search({ query: rawInput, limit: 10 }).catch(() => null);
+                    if (searchResults && searchResults.size > 0) {
+                        targetMember = searchResults.find(m => 
+                            m.user.username.toLowerCase() === rawInput.toLowerCase() ||
+                            m.displayName.toLowerCase() === rawInput.toLowerCase() ||
+                            m.user.tag.toLowerCase() === rawInput.toLowerCase()
+                        ) || searchResults.first();
+                    }
+                }
+
+                // 3. Fallback search cache
+                if (!targetMember) {
+                    targetMember = interaction.guild.members.cache.find(m =>
+                        m.user.username.toLowerCase() === rawInput.toLowerCase() ||
+                        m.displayName.toLowerCase() === rawInput.toLowerCase() ||
+                        m.user.tag.toLowerCase() === rawInput.toLowerCase()
+                    );
+                }
+
+                if (!targetMember) {
+                    return interaction.editReply({
+                        content: `Could not find any member matching **"${rawInput}"**. Please verify the username/display name or enter their numeric User ID.`
+                    });
+                }
+
+                // Grant ticket channel permissions
+                await interaction.channel.permissionOverwrites.edit(targetMember.id, {
+                    ViewChannel: true,
+                    SendMessages: true,
+                    ReadMessageHistory: true
+                });
+
+                // Send public announcement
+                await interaction.channel.send(`<@${targetMember.id}> has been added to the ticket by <@${interaction.user.id}>.`);
+
+                // Send log
+                const logEmbed = new EmbedBuilder()
+                    .setTitle('User Added to Ticket')
+                    .addFields(
+                        { name: 'Ticket', value: `<#${interaction.channel.id}>`, inline: true },
+                        { name: 'Added User', value: `${targetMember.user.tag} (<@${targetMember.id}>)`, inline: true },
+                        { name: 'Moderator', value: `<@${interaction.user.id}>`, inline: true }
+                    )
+                    .setTimestamp()
+                    .setColor('#3498db');
+                sendLog(TICKET_LOG_CHANNEL, logEmbed);
+
+                return interaction.editReply({
+                    content: `Successfully added **${targetMember.user.tag}** (<@${targetMember.id}>) to this ticket!`
+                });
+            } catch (err) {
+                console.error('Error adding member to ticket via modal:', err);
+                return interaction.editReply({
+                    content: `An error occurred while adding that member: ${err.message}`
+                });
+            }
+        }
         const parts = interaction.customId.split('_');
 
         if (interaction.customId === 'modal_giveaway_setup') {
