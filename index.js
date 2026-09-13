@@ -1334,7 +1334,103 @@ client.once('ready', async () => {
     // Start temporary actions checker
     setInterval(() => checkTemporaryActions(client), 60000);
     checkTemporaryActions(client);
+
+    // Start YouTube Live Stream monitor (checks every 60 seconds)
+    setInterval(() => checkYouTubeLiveStatus(client), 60000);
+    checkYouTubeLiveStatus(client);
 });
+
+
+// --- YOUTUBE LIVE STREAM MONITOR ---
+const YOUTUBE_CHANNEL_LIVE_URL = 'https://www.youtube.com/@BunjiMC/live';
+const STREAM_NOTIF_CHANNEL_ID = '1322861363915395082';
+const STREAM_NOTIF_ROLE_ID = '1322867157733740564';
+const STREAM_TRACKER_FILE = path.join(__dirname, 'streamTracker.json');
+
+function loadStreamTracker() {
+    if (fs.existsSync(STREAM_TRACKER_FILE)) {
+        try {
+            return JSON.parse(fs.readFileSync(STREAM_TRACKER_FILE, 'utf8'));
+        } catch (e) {
+            console.error('Error reading stream tracker:', e);
+        }
+    }
+    return { lastAnnouncedVideoId: null, isLive: false };
+}
+
+function saveStreamTracker(data) {
+    try {
+        fs.writeFileSync(STREAM_TRACKER_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error('Error saving stream tracker:', e);
+    }
+}
+
+async function checkYouTubeLiveStatus(client) {
+    try {
+        const response = await fetch(YOUTUBE_CHANNEL_LIVE_URL, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9'
+            },
+            redirect: 'follow'
+        });
+
+        const html = await response.text();
+
+        // Extract canonical video ID
+        const canonicalMatch = html.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})"/);
+        let videoId = canonicalMatch ? canonicalMatch[1] : null;
+
+        if (!videoId) {
+            const urlMatch = response.url.match(/watch\?v=([a-zA-Z0-9_-]{11})/);
+            if (urlMatch) videoId = urlMatch[1];
+        }
+
+        // Check if stream is actively live
+        const isLive = html.includes('"isLive":true') || 
+                       html.includes('itemprop="isLiveBroadcast" content="True"') || 
+                       html.includes('"status":"LIVE"') ||
+                       html.includes('"isLiveBroadcast":true');
+
+        const tracker = loadStreamTracker();
+
+        if (isLive && videoId) {
+            // New live stream detected that hasn't been announced yet
+            if (tracker.lastAnnouncedVideoId !== videoId) {
+                console.log(`[YouTube Monitor] New live stream detected: ${videoId}. Sending announcement!`);
+                tracker.lastAnnouncedVideoId = videoId;
+                tracker.isLive = true;
+                saveStreamTracker(tracker);
+
+                const channel = await client.channels.fetch(STREAM_NOTIF_CHANNEL_ID).catch(() => null);
+                if (channel && channel.isTextBased()) {
+                    const streamUrl = `https://www.youtube.com/watch?v=${videoId}`;
+                    const messageContent = `<@&${STREAM_NOTIF_ROLE_ID}> **I'm LIVE RN**, come join or else josh will tickle ur toes\n${streamUrl}`;
+                    await channel.send({
+                        content: messageContent,
+                        allowedMentions: { roles: [STREAM_NOTIF_ROLE_ID] }
+                    });
+                }
+            } else {
+                // Same stream is still active
+                if (!tracker.isLive) {
+                    tracker.isLive = true;
+                    saveStreamTracker(tracker);
+                }
+            }
+        } else {
+            // Stream is offline or ended
+            if (tracker.isLive) {
+                console.log('[YouTube Monitor] Stream has ended. Resetting live state.');
+                tracker.isLive = false;
+                saveStreamTracker(tracker);
+            }
+        }
+    } catch (err) {
+        console.error('[YouTube Monitor] Error checking live status:', err.message);
+    }
+}
 
 // --- GIVEAWAY SCHEDULING ---
 const giveawayTimers = new Map();
