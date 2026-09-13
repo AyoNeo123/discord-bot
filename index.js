@@ -97,6 +97,91 @@ function getNextTicketNumber(type) {
     return String(counts[type]).padStart(4, '0');
 }
 
+async function getTicketClaimerId(channel) {
+    if (channel.topic) {
+        const match = channel.topic.match(/Claimed:\s*(\d+)/i);
+        if (match) return match[1];
+    }
+    try {
+        const messages = await channel.messages.fetch({ limit: 30 });
+        const claimMsg = messages.find(m => m.embeds && m.embeds.some(e => e.title && e.title.includes('Ticket Claimed')));
+        if (claimMsg && claimMsg.embeds[0].description) {
+            const match = claimMsg.embeds[0].description.match(/<@(\d+)>/);
+            if (match) return match[1];
+        }
+    } catch (e) {}
+    return null;
+}
+
+async function buildStaffPanelPayload(channel) {
+    const creatorId = await getTicketCreatorId(channel);
+    const claimerId = await getTicketClaimerId(channel);
+    const creatorOverwrite = creatorId ? channel.permissionOverwrites.cache.get(creatorId) : null;
+    const isOnHold = creatorOverwrite ? creatorOverwrite.deny.has(PermissionFlagsBits.SendMessages) : false;
+
+    const embed = new EmbedBuilder()
+        .setTitle('🛠️ Staff Control Panel')
+        .setDescription(
+            `Manage ticket settings, permissions, and moderation below.\n\n` +
+            `📋 **Ticket Overview**\n` +
+            `• **Channel:** <#${channel.id}>\n` +
+            `• **Creator:** ${creatorId ? `<@${creatorId}>` : '*Unknown*'}\n` +
+            `• **Status:** ${isOnHold ? '⏸️ **On Hold** (Messaging paused)' : '🟢 **Active**'}\n` +
+            `• **Claimed By:** ${claimerId ? `<@${claimerId}>` : '*Unclaimed*'}\n\n` +
+            `*Use the menus below to execute staff actions or manage ticket members.*`
+        )
+        .setColor(isOnHold ? '#f39c12' : '#2F3136')
+        .setFooter({ text: 'BunjiBot Ticket System • Staff Only' });
+
+    const actionOptions = [
+        new StringSelectMenuOptionBuilder()
+            .setValue('claim')
+            .setLabel(claimerId ? 'Ticket Already Claimed' : 'Claim Ticket')
+            .setDescription(claimerId ? 'Currently assigned to staff' : 'Take ownership and handle this ticket')
+            .setEmoji('✋'),
+        new StringSelectMenuOptionBuilder()
+            .setValue(isOnHold ? 'unhold' : 'hold')
+            .setLabel(isOnHold ? 'Remove Hold' : 'Put On Hold')
+            .setDescription(isOnHold ? 'Resume ticket and restore member messaging' : 'Pause ticket and restrict member messaging')
+            .setEmoji(isOnHold ? '▶️' : '⏸️'),
+        new StringSelectMenuOptionBuilder()
+            .setValue('addrole')
+            .setLabel('Assign Role to Creator')
+            .setDescription('Select and grant a server role to the ticket creator')
+            .setEmoji('🏷️'),
+        new StringSelectMenuOptionBuilder()
+            .setValue('vc')
+            .setLabel('Create Voice Channel')
+            .setDescription('Generate a private voice room for this ticket')
+            .setEmoji('🎤'),
+        new StringSelectMenuOptionBuilder()
+            .setValue('delete')
+            .setLabel('Delete Ticket')
+            .setDescription('Prompt confirmation and delete after 10 seconds')
+            .setEmoji('🗑️'),
+        new StringSelectMenuOptionBuilder()
+            .setValue('silentdelete')
+            .setLabel('Silent Delete')
+            .setDescription('Instantly delete this ticket with no warning')
+            .setEmoji('⚠️')
+    ];
+
+    const actionMenu = new StringSelectMenuBuilder()
+        .setCustomId('ticket_staff_action')
+        .setPlaceholder('⚙️ Select a staff action to perform...')
+        .addOptions(actionOptions);
+
+    const row1 = new ActionRowBuilder().addComponents(actionMenu);
+
+    const userSelectMenu = new UserSelectMenuBuilder()
+        .setCustomId('ticket_adduser')
+        .setPlaceholder('👤 Select someone to add to this ticket...');
+
+    const row2 = new ActionRowBuilder().addComponents(userSelectMenu);
+
+    return { embeds: [embed], components: [row1, row2] };
+}
+
 async function getTicketCreatorId(channel) {
     if (channel.topic) {
         const match = channel.topic.match(/Creator:\s*(\d+)/i);
@@ -2025,7 +2110,204 @@ client.on('interactionCreate', async interaction => {
 
     // 2. String Select Menus
     else if (interaction.isStringSelectMenu()) {
-        if (interaction.customId === 'ticket_menu') {
+        if (interaction.customId === 'ticket_staff_action') {
+            if (!interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID) && !interaction.member.permissions.has('ModerateMembers')) {
+                return interaction.reply({ content: 'You do not have permission to use the Staff Panel.', ephemeral: true });
+            }
+
+            const selected = interaction.values[0];
+
+            if (selected === 'claim') {
+                const claimEmbed = new EmbedBuilder()
+                    .setTitle('Ticket Claimed ✋')
+                    .setDescription(`This ticket will be handled by <@${interaction.user.id}>.`)
+                    .setColor('#2ecc71');
+                await interaction.channel.send({ embeds: [claimEmbed] });
+
+                const logEmbed = new EmbedBuilder()
+                    .setTitle('Ticket Claimed')
+                    .addFields(
+                        { name: 'Ticket', value: `<#${interaction.channel.id}>`, inline: true },
+                        { name: 'Claimed By', value: `<@${interaction.user.id}>`, inline: true }
+                    )
+                    .setTimestamp()
+                    .setColor('#2ecc71');
+                sendLog(TICKET_LOG_CHANNEL, logEmbed);
+
+                const existingTopic = interaction.channel.topic || '';
+                if (!existingTopic.includes('Claimed:')) {
+                    await interaction.channel.setTopic(`${existingTopic} | Claimed: ${interaction.user.id}`).catch(() => {});
+                }
+
+                const panelData = await buildStaffPanelPayload(interaction.channel);
+                return interaction.update(panelData);
+            }
+            else if (selected === 'hold') {
+                const creatorId = await getTicketCreatorId(interaction.channel);
+                if (creatorId) {
+                    await interaction.channel.permissionOverwrites.edit(creatorId, { SendMessages: false }).catch(console.error);
+                }
+
+                const holdEmbed = new EmbedBuilder()
+                    .setTitle('Ticket On Hold ⏸️')
+                    .setDescription(`This ticket has been placed on hold by <@${interaction.user.id}> and will be dealt with later.${creatorId ? `\n\n*<@${creatorId}>'s permission to send messages has been paused.*` : ''}`)
+                    .setColor('#3498db');
+
+                const logEmbed = new EmbedBuilder()
+                    .setTitle('Ticket On Hold')
+                    .addFields(
+                        { name: 'Ticket', value: `<#${interaction.channel.id}>`, inline: true },
+                        { name: 'Hold By', value: `<@${interaction.user.id}>`, inline: true }
+                    )
+                    .setTimestamp()
+                    .setColor('#3498db');
+                sendLog(TICKET_LOG_CHANNEL, logEmbed);
+
+                await interaction.channel.send({ embeds: [holdEmbed] });
+
+                const panelData = await buildStaffPanelPayload(interaction.channel);
+                return interaction.update(panelData);
+            }
+            else if (selected === 'unhold') {
+                const creatorId = await getTicketCreatorId(interaction.channel);
+                if (creatorId) {
+                    await interaction.channel.permissionOverwrites.edit(creatorId, { SendMessages: true }).catch(console.error);
+                }
+
+                const unholdEmbed = new EmbedBuilder()
+                    .setTitle('Ticket Resumed ▶️')
+                    .setDescription(`This ticket has been taken off hold by <@${interaction.user.id}>.${creatorId ? `\n\n*<@${creatorId}> can now send messages again.*` : ''}`)
+                    .setColor('#2ecc71');
+
+                const logEmbed = new EmbedBuilder()
+                    .setTitle('Ticket Removed From Hold')
+                    .addFields(
+                        { name: 'Ticket', value: `<#${interaction.channel.id}>`, inline: true },
+                        { name: 'Unhold By', value: `<@${interaction.user.id}>`, inline: true }
+                    )
+                    .setTimestamp()
+                    .setColor('#2ecc71');
+                sendLog(TICKET_LOG_CHANNEL, logEmbed);
+
+                await interaction.channel.send({ embeds: [unholdEmbed] });
+
+                const panelData = await buildStaffPanelPayload(interaction.channel);
+                return interaction.update(panelData);
+            }
+            else if (selected === 'addrole') {
+                const creatorId = await getTicketCreatorId(interaction.channel);
+                if (!creatorId) {
+                    return interaction.reply({ content: 'Could not determine the ticket creator for this channel.', ephemeral: true });
+                }
+
+                const member = await interaction.guild.members.fetch(creatorId).catch(() => null);
+                if (!member) {
+                    return interaction.reply({ content: `Could not find member <@${creatorId}> in this server.`, ephemeral: true });
+                }
+
+                const roleSelectMenu = new RoleSelectMenuBuilder()
+                    .setCustomId(`ticket_selectrole_${creatorId}`)
+                    .setPlaceholder(`Select a role to assign to ${member.user.username}`)
+                    .setMinValues(1)
+                    .setMaxValues(1);
+
+                const roleRow = new ActionRowBuilder().addComponents(roleSelectMenu);
+
+                const roleEmbed = new EmbedBuilder()
+                    .setTitle('Assign Role to Ticket Creator 🏷️')
+                    .setDescription(`Select a role from the dropdown below to assign to <@${creatorId}>:`)
+                    .setColor('#3498db');
+
+                const panelData = await buildStaffPanelPayload(interaction.channel);
+                await interaction.update(panelData);
+
+                return interaction.followUp({ embeds: [roleEmbed], components: [roleRow], ephemeral: true });
+            }
+            else if (selected === 'vc') {
+                const overwrites = interaction.channel.permissionOverwrites.cache;
+                const voiceOverwrites = [
+                    {
+                        id: interaction.guild.roles.everyone,
+                        deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect],
+                    },
+                    {
+                        id: TICKET_STAFF_ROLE_ID,
+                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak],
+                    }
+                ];
+                for (const [id, overwrite] of overwrites) {
+                    if (overwrite.type === 1) {
+                        voiceOverwrites.push({
+                            id: id,
+                            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak],
+                        });
+                    }
+                }
+
+                try {
+                    const vc = await interaction.guild.channels.create({
+                        name: `${interaction.channel.name}-vc`,
+                        type: ChannelType.GuildVoice,
+                        parent: TICKET_CATEGORY_ID,
+                        permissionOverwrites: voiceOverwrites
+                    });
+
+                    const vcEmbed = new EmbedBuilder()
+                        .setTitle('Voice Channel Created 🎤')
+                        .setDescription(`A private voice channel has been created for this ticket: <#${vc.id}>`)
+                        .setColor('#9b59b6');
+                    await interaction.channel.send({ embeds: [vcEmbed] });
+
+                    const logEmbed = new EmbedBuilder()
+                        .setTitle('Voice Channel Created')
+                        .addFields(
+                            { name: 'Ticket', value: `<#${interaction.channel.id}>`, inline: true },
+                            { name: 'Voice Channel', value: `<#${vc.id}>`, inline: true },
+                            { name: 'Created By', value: `<@${interaction.user.id}>`, inline: true }
+                        )
+                        .setTimestamp()
+                        .setColor('#9b59b6');
+                    sendLog(TICKET_LOG_CHANNEL, logEmbed);
+
+                    const panelData = await buildStaffPanelPayload(interaction.channel);
+                    await interaction.update(panelData);
+
+                    return interaction.followUp({ content: `Private voice channel created: <#${vc.id}>`, ephemeral: true });
+                } catch (err) {
+                    console.error('Error creating ticket VC:', err);
+                    return interaction.followUp({ content: `Failed to create voice channel: ${err.message}`, ephemeral: true });
+                }
+            }
+            else if (selected === 'delete') {
+                const confirmRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId('ticket_deleteconfirm').setLabel('Confirm Delete').setStyle(ButtonStyle.Danger)
+                );
+
+                const panelData = await buildStaffPanelPayload(interaction.channel);
+                await interaction.update(panelData);
+
+                return interaction.followUp({ content: 'Are you sure you want to delete this ticket? Click confirm to delete in 10 seconds.', components: [confirmRow], ephemeral: true });
+            }
+            else if (selected === 'silentdelete') {
+                const vcName = `${interaction.channel.name}-vc`;
+                const vc = interaction.guild.channels.cache.find(c => c.name === vcName && c.type === ChannelType.GuildVoice);
+                if (vc) vc.delete().catch(console.error);
+
+                const logEmbed = new EmbedBuilder()
+                    .setTitle('Ticket Deleted')
+                    .addFields(
+                        { name: 'Ticket Name', value: interaction.channel.name, inline: true },
+                        { name: 'Deleted By', value: `<@${interaction.user.id}>`, inline: true },
+                        { name: 'Method', value: 'Silent Delete', inline: true }
+                    )
+                    .setTimestamp()
+                    .setColor('#c0392b');
+                sendLog(TICKET_LOG_CHANNEL, logEmbed);
+
+                return interaction.channel.delete().catch(console.error);
+            }
+        }
+        else if (interaction.customId === 'ticket_menu') {
             const selected = interaction.values[0];
 
             if (selected === 'ticket_general') {
@@ -2388,37 +2670,8 @@ client.on('interactionCreate', async interaction => {
                     return interaction.reply({ content: 'You do not have permission to use the Staff Panel.', ephemeral: true });
                 }
 
-                const creatorId = await getTicketCreatorId(interaction.channel);
-                const creatorOverwrite = creatorId ? interaction.channel.permissionOverwrites.cache.get(creatorId) : null;
-                const isOnHold = creatorOverwrite ? creatorOverwrite.deny.has(PermissionFlagsBits.SendMessages) : false;
-
-                const embed = new EmbedBuilder()
-                    .setDescription(`\`Claim ticket\` - Announce you will handle this ticket\n\`${isOnHold ? 'Remove hold' : 'Put on hold'}\` - ${isOnHold ? 'Resume ticket and restore member messaging' : 'Announce ticket is on hold and pause member messaging'}\n\`Add Role\` - Assign a role to the ticket creator\n\`Create Voice Channel\` - Private voice channel for this ticket\n\`Delete Ticket\` - Prompts for confirmation then deletes in 10s\n\`Silent Delete\` - Instant deletion of the ticket (no warning)\n\`Add to ticket\` - Add anyone from the drop down below`)
-                    .setColor('#2F3136');
-
-                const holdButton = isOnHold
-                    ? new ButtonBuilder().setCustomId('ticket_unhold').setLabel('Remove hold').setStyle(ButtonStyle.Success).setEmoji('▶️')
-                    : new ButtonBuilder().setCustomId('ticket_hold').setLabel('Put on hold').setStyle(ButtonStyle.Primary).setEmoji('⏸️');
-
-                const row1 = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder().setCustomId('ticket_claim').setLabel('Claim ticket').setStyle(ButtonStyle.Success),
-                    holdButton,
-                    new ButtonBuilder().setCustomId('ticket_addrole').setLabel('Add Role').setStyle(ButtonStyle.Secondary).setEmoji('🏷️'),
-                    new ButtonBuilder().setCustomId('ticket_vc').setLabel('Create Voice Channel').setStyle(ButtonStyle.Primary).setEmoji('🎤')
-                );
-
-                const row2 = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder().setCustomId('ticket_delete').setLabel('Delete Ticket').setStyle(ButtonStyle.Secondary),
-                    new ButtonBuilder().setCustomId('ticket_silentdelete').setLabel('Silent Delete').setStyle(ButtonStyle.Danger)
-                );
-
-                const row3 = new ActionRowBuilder().addComponents(
-                    new UserSelectMenuBuilder()
-                        .setCustomId('ticket_adduser')
-                        .setPlaceholder('Select someone to add to the ticket')
-                );
-
-                return interaction.reply({ embeds: [embed], components: [row1, row2, row3], ephemeral: true });
+                const panelData = await buildStaffPanelPayload(interaction.channel);
+                return interaction.reply({ ...panelData, ephemeral: true });
             }
             else if (action === 'claim') {
                 if (!interaction.member.roles.cache.has(TICKET_STAFF_ROLE_ID) && !interaction.member.permissions.has('ModerateMembers')) {
