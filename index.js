@@ -274,6 +274,7 @@ const PROTECTED_USER_ID = '1187690305516994631';
 const HELP_ROLE_ID = '1323180252666663043';
 const TICKET_STAFF_ROLE_ID = '1373246947732885684';
 const TICKET_CATEGORY_ID = '1322885511387545630';
+const IGNORED_CATEGORIES = ['1261616857056542730', '1322860706231484549'];
 const WARNING_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 
 const NORMAL_LOG_CHANNEL = '1397224089055133838';
@@ -298,8 +299,8 @@ client.on('messageCreate', async message => {
     // Ignore messages from other bots
     if (message.author.bot) return;
 
-    // Ignore messages in specific category
-    if (message.channel.parentId === '1261616857056542730') return;
+    // Ignore messages in specific categories (channels and threads)
+    if (IGNORED_CATEGORIES.includes(message.channel.parentId) || (message.channel.parent && IGNORED_CATEGORIES.includes(message.channel.parent.parentId))) return;
 
     // --- DM FORWARDING LOGIC ---
     if (!message.guild) {
@@ -376,6 +377,8 @@ client.on('messageCreate', async message => {
     const isBotMentioned = message.mentions.has(client.user.id) || message.content.toLowerCase().includes('bunji bot');
 
     if (isBotMentioned) {
+        // Ensure bot never replies in ignored categories
+        if (IGNORED_CATEGORIES.includes(message.channel.parentId) || (message.channel.parent && IGNORED_CATEGORIES.includes(message.channel.parent.parentId))) return;
         await message.channel.sendTyping();
 
         try {
