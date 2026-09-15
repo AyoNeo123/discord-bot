@@ -1343,6 +1343,7 @@ client.once('ready', async () => {
 
 // --- YOUTUBE LIVE STREAM MONITOR ---
 const YOUTUBE_CHANNEL_LIVE_URL = 'https://www.youtube.com/@BunjiMC/live';
+const YOUTUBE_CHANNEL_RSS_URL = 'https://www.youtube.com/feeds/videos.xml?channel_id=UCc7z8FSm9zmRe6BkLMoZA3A';
 const STREAM_NOTIF_CHANNEL_ID = '1322861363915395082';
 const STREAM_NOTIF_ROLE_ID = '1322867157733740564';
 const STREAM_TRACKER_FILE = path.join(__dirname, 'streamTracker.json');
@@ -1368,44 +1369,99 @@ function saveStreamTracker(data) {
 
 async function checkYouTubeLiveStatus(client) {
     try {
-        const response = await fetch(YOUTUBE_CHANNEL_LIVE_URL, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9'
-            },
-            redirect: 'follow'
-        });
+        let detectedVideoId = null;
+        let isLive = false;
 
-        const html = await response.text();
+        // 1. Primary Check: Official YouTube Channel RSS Feed
+        try {
+            const rssResp = await fetch(YOUTUBE_CHANNEL_RSS_URL, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'application/xml, text/xml, */*'
+                }
+            });
 
-        // Extract canonical video ID
-        const canonicalMatch = html.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})"/);
-        let videoId = canonicalMatch ? canonicalMatch[1] : null;
+            if (rssResp.ok) {
+                const xml = await rssResp.text();
+                const entryMatch = xml.match(/<entry>[\s\S]*?<\/entry>/);
+                if (entryMatch) {
+                    const entry = entryMatch[0];
+                    const idMatch = entry.match(/<yt:videoId>([^<]+)<\/yt:videoId>/);
+                    const titleMatch = entry.match(/<title>([^<]+)<\/title>/);
+                    if (idMatch) {
+                        const vid = idMatch[1];
+                        const title = titleMatch ? titleMatch[1] : '';
 
-        if (!videoId) {
-            const urlMatch = response.url.match(/watch\?v=([a-zA-Z0-9_-]{11})/);
-            if (urlMatch) videoId = urlMatch[1];
+                        // Check watch page of latest entry to verify active live status
+                        const watchResp = await fetch(`https://www.youtube.com/watch?v=${vid}`, {
+                            headers: {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                                'Accept-Language': 'en-US,en;q=0.9'
+                            }
+                        });
+
+                        if (watchResp.ok) {
+                            const watchHtml = await watchResp.text();
+                            const isLiveNow = watchHtml.includes('"isLiveNow":true');
+                            const isLiveContent = watchHtml.includes('"isLiveContent":true');
+                            const hasEndTimestamp = watchHtml.includes('"endTimestamp"');
+                            const isUpcoming = watchHtml.includes('"isUpcoming":true') || watchHtml.includes('"status":"UPCOMING"');
+
+                            if (isLiveNow || (isLiveContent && !hasEndTimestamp && !isUpcoming && (title.toLowerCase().includes('live') || watchHtml.includes('isLiveBroadcast')))) {
+                                detectedVideoId = vid;
+                                isLive = true;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (rssErr) {
+            console.error('[YouTube Monitor] RSS check error:', rssErr.message);
         }
 
-        // Check if stream is actively live
-        const isLive = html.includes('"isLive":true') || 
-                       html.includes('itemprop="isLiveBroadcast" content="True"') || 
-                       html.includes('"status":"LIVE"') ||
-                       html.includes('"isLiveBroadcast":true');
+        // 2. Fallback Check: /live endpoint
+        if (!isLive) {
+            try {
+                const liveResp = await fetch(YOUTUBE_CHANNEL_LIVE_URL, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept-Language': 'en-US,en;q=0.9'
+                    },
+                    redirect: 'follow'
+                });
+
+                if (liveResp.ok) {
+                    const liveHtml = await liveResp.text();
+                    const hasLiveIndicator = liveHtml.includes('"isLiveNow":true') || 
+                                             liveHtml.includes('BADGE_STYLE_TYPE_LIVE_NOW') || 
+                                             liveHtml.includes('"status":"LIVE"');
+
+                    if (hasLiveIndicator) {
+                        const idMatch = liveHtml.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+                        if (idMatch) {
+                            detectedVideoId = idMatch[1];
+                            isLive = true;
+                        }
+                    }
+                }
+            } catch (liveErr) {
+                console.error('[YouTube Monitor] /live fallback error:', liveErr.message);
+            }
+        }
 
         const tracker = loadStreamTracker();
 
-        if (isLive && videoId) {
+        if (isLive && detectedVideoId) {
             // New live stream detected that hasn't been announced yet
-            if (tracker.lastAnnouncedVideoId !== videoId) {
-                console.log(`[YouTube Monitor] New live stream detected: ${videoId}. Sending announcement!`);
-                tracker.lastAnnouncedVideoId = videoId;
+            if (tracker.lastAnnouncedVideoId !== detectedVideoId) {
+                console.log(`[YouTube Monitor] New live stream detected: ${detectedVideoId}. Sending announcement!`);
+                tracker.lastAnnouncedVideoId = detectedVideoId;
                 tracker.isLive = true;
                 saveStreamTracker(tracker);
 
                 const channel = await client.channels.fetch(STREAM_NOTIF_CHANNEL_ID).catch(() => null);
                 if (channel && channel.isTextBased()) {
-                    const streamUrl = `https://www.youtube.com/watch?v=${videoId}`;
+                    const streamUrl = `https://www.youtube.com/watch?v=${detectedVideoId}`;
                     const messageContent = `<@&${STREAM_NOTIF_ROLE_ID}> **I'm LIVE RN**, come join or else josh will tickle ur toes\n${streamUrl}`;
                     await channel.send({
                         content: messageContent,
