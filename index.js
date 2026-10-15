@@ -244,9 +244,17 @@ function parseDuration(timeStr) {
     }
 }
 
-const groq = new Groq({
-    apiKey: process.env.GROQ_API_KEY
-});
+let groq = null;
+if (process.env.GROQ_API_KEY) {
+    try {
+        groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+        console.log('[Groq] Initialized successfully.');
+    } catch (err) {
+        console.error('[Groq] Failed to initialize:', err.message);
+    }
+} else {
+    console.warn('[Groq] GROQ_API_KEY is not set. AI assistant features will be disabled, but Discord bot will continue running.');
+}
 
 // Create a new client instance
 const client = new Client({ 
@@ -3799,18 +3807,73 @@ client.on('guildMemberAdd', async member => {
     }
 });
 
-// --- KEEP-ALIVE SERVER (Render + UptimeRobot) ---
+// --- GLOBAL ERROR TRAPPING ---
+global.lastDiscordError = null;
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Process Unhandled Rejection]', reason);
+    global.lastDiscordError = reason instanceof Error ? reason.message : String(reason);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('[Process Uncaught Exception]', err);
+    global.lastDiscordError = err.message || String(err);
+});
+
+client.on('error', err => {
+    console.error('[Discord Client Error]', err);
+    global.lastDiscordError = err.message || String(err);
+});
+
+client.on('shardError', (error, shardId) => {
+    console.error(`[Discord Shard ${shardId} Error]`, error);
+    global.lastDiscordError = error.message || String(error);
+});
+
+// --- KEEP-ALIVE & DIAGNOSTIC SERVER (Render + UptimeRobot) ---
 const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('Bunji Bot is alive and well!');
+    const isReady = client && client.isReady();
+    res.json({
+        webServer: "ONLINE",
+        discordBot: isReady ? "ONLINE" : "OFFLINE",
+        botTag: isReady ? client.user.tag : null,
+        guilds: isReady ? client.guilds.cache.size : 0,
+        ping: isReady ? `${client.ws.ping}ms` : null,
+        wsStatus: client ? client.ws.status : null,
+        environment: {
+            hasDiscordToken: !!process.env.DISCORD_TOKEN,
+            tokenLength: process.env.DISCORD_TOKEN ? process.env.DISCORD_TOKEN.trim().length : 0,
+            hasGroqApiKey: !!process.env.GROQ_API_KEY
+        },
+        lastError: global.lastDiscordError || null,
+        uptimeSeconds: Math.floor(process.uptime())
+    });
 });
 
-app.listen(port, () => {
-    console.log(`Keep-alive web server is listening on port ${port}`);
+app.listen(port, '0.0.0.0', () => {
+    console.log(`Keep-alive web server is listening on 0.0.0.0:${port}`);
 });
 
-// Start the bot
-client.login(process.env.DISCORD_TOKEN);
+// Start the bot with sanitized token and explicit error logging
+if (!process.env.DISCORD_TOKEN) {
+    const err = 'FATAL: DISCORD_TOKEN is missing or undefined in environment variables!';
+    console.error(err);
+    global.lastDiscordError = err;
+} else {
+    // Strip accidental quotes or surrounding whitespace
+    const cleanToken = process.env.DISCORD_TOKEN.trim().replace(/^["']|["']$/g, '');
+    console.log(`[Startup] Logging in with DISCORD_TOKEN (length: ${cleanToken.length})...`);
+    client.login(cleanToken)
+        .then(() => {
+            console.log(`[Startup] Successfully logged in to Discord as ${client.user.tag}!`);
+        })
+        .catch(err => {
+            console.error('[Startup] FAILED TO LOGIN TO DISCORD:', err);
+            global.lastDiscordError = `Login Error: ${err.message || String(err)}`;
+        });
+}
+
