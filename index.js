@@ -399,7 +399,7 @@ client.on('messageCreate', async message => {
             if (byId) return byId;
         }
 
-        // 2. Clean possessive 's, trailing slang, or punctuation (e.g. "tavoids" -> "tavoid", "john's" -> "john")
+        // 2. Clean possessive 's, trailing punctuation, or symbols
         let searchTerm = cleanStr
             .replace(/['’]s$/i, '')
             .replace(/^@/, '')
@@ -409,36 +409,45 @@ client.on('messageCreate', async message => {
 
         if (!searchTerm) searchTerm = cleanStr.toLowerCase();
 
-        // 3. Search cached members
+        // 3. Search cached members (exact, startsWith, includes)
         const cached = Array.from(guild.members.cache.values());
         
-        let found = cached.find(m => 
-            m.user.username.toLowerCase() === searchTerm ||
-            m.displayName.toLowerCase() === searchTerm ||
-            (m.nickname && m.nickname.toLowerCase() === searchTerm) ||
-            m.user.tag.toLowerCase() === searchTerm
-        );
-        if (found) return found;
+        const matchInCache = (term) => {
+            if (!term) return null;
+            return cached.find(m => 
+                m.user.username.toLowerCase() === term ||
+                m.displayName.toLowerCase() === term ||
+                (m.nickname && m.nickname.toLowerCase() === term) ||
+                m.user.tag.toLowerCase() === term
+            ) || cached.find(m => 
+                m.user.username.toLowerCase().startsWith(term) ||
+                m.displayName.toLowerCase().startsWith(term)
+            ) || cached.find(m => 
+                m.user.username.toLowerCase().includes(term) ||
+                m.displayName.toLowerCase().includes(term)
+            );
+        };
 
-        found = cached.find(m => 
-            m.user.username.toLowerCase().startsWith(searchTerm) ||
-            m.displayName.toLowerCase().startsWith(searchTerm)
-        );
-        if (found) return found;
-
-        found = cached.find(m => 
-            m.user.username.toLowerCase().includes(searchTerm) ||
-            m.displayName.toLowerCase().includes(searchTerm)
-        );
+        let found = matchInCache(searchTerm);
+        // If not found and ends with 's', try searching without trailing 's' (e.g. "tavoids" -> "tavoid")
+        if (!found && searchTerm.endsWith('s') && searchTerm.length > 2) {
+            found = matchInCache(searchTerm.slice(0, -1));
+        }
         if (found) return found;
 
         // 4. REST search on guild members
         try {
-            const searchResults = await guild.members.search({ query: searchTerm, limit: 10 });
+            let searchResults = await guild.members.search({ query: searchTerm, limit: 10 });
+            if ((!searchResults || searchResults.size === 0) && searchTerm.endsWith('s') && searchTerm.length > 2) {
+                searchResults = await guild.members.search({ query: searchTerm.slice(0, -1), limit: 10 });
+            }
             if (searchResults && searchResults.size > 0) {
+                const queryBase = (searchTerm.endsWith('s') && searchTerm.length > 2) ? searchTerm.slice(0, -1) : searchTerm;
                 const exactInSearch = searchResults.find(m => 
                     m.user.username.toLowerCase() === searchTerm ||
-                    m.displayName.toLowerCase() === searchTerm
+                    m.displayName.toLowerCase() === searchTerm ||
+                    m.user.username.toLowerCase() === queryBase ||
+                    m.displayName.toLowerCase() === queryBase
                 );
                 return exactInSearch || searchResults.first();
             }
@@ -723,27 +732,76 @@ INSTRUCTIONS FOR USER & NAME RESOLUTION:
                 { role: "user", content: prompt || "Hello" }
             ];
 
-            // Try Groq models with automatic fallback
-            const candidateModels = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "openai/gpt-oss-20b", "llama3-70b-8192"];
+            // Dynamically discover available Groq models from API if possible
+            let dynamicModels = [];
+            try {
+                const listResp = await groq.models.list();
+                if (listResp && Array.isArray(listResp.data)) {
+                    dynamicModels = listResp.data.map(m => m.id);
+                    console.log(`[Groq] Retrieved ${dynamicModels.length} active models from API`);
+                }
+            } catch (listErr) {
+                console.warn(`[Groq] Failed to fetch active models list:`, listErr.message);
+            }
+
+            // Top models supporting tool use and text chat on Groq
+            const preferredModels = [
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "qwen/qwen3.8-27b",
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant"
+            ];
+
+            let candidateModels = [];
+            if (dynamicModels.length > 0) {
+                const availablePreferred = preferredModels.filter(m => dynamicModels.includes(m));
+                const otherDynamicText = dynamicModels.filter(m => 
+                    !preferredModels.includes(m) && 
+                    !m.includes('whisper') && 
+                    !m.includes('guard') &&
+                    !m.includes('decommissioned')
+                );
+                candidateModels = [...new Set([...availablePreferred, ...preferredModels, ...otherDynamicText])];
+            } else {
+                candidateModels = preferredModels;
+            }
+
             let chatCompletion = null;
             let lastModelError = null;
 
             for (const modelCandidate of candidateModels) {
                 try {
-                    chatCompletion = await groq.chat.completions.create({
+                    const reqOptions = {
                         messages: chatMessages,
                         model: modelCandidate,
-                        tools: tools,
-                        tool_choice: "auto",
-                    });
+                    };
+                    if (tools && tools.length > 0) {
+                        reqOptions.tools = tools;
+                        reqOptions.tool_choice = "auto";
+                    }
+
+                    chatCompletion = await groq.chat.completions.create(reqOptions);
                     if (chatCompletion) {
                         console.log(`[Groq] Successfully generated completion using model: ${modelCandidate}`);
                         break;
                     }
                 } catch (err) {
                     lastModelError = err;
-                    if (err.message && (err.message.includes('does not exist') || err.message.includes('model_not_found') || err.code === 'model_not_found')) {
-                        console.warn(`[Groq] Model ${modelCandidate} not available (${err.message}), trying next candidate...`);
+                    const isModelUnavailable = 
+                        err.code === 'model_decommissioned' || 
+                        err.code === 'model_not_found' ||
+                        err.status === 404 ||
+                        (err.message && (
+                            err.message.includes('decommissioned') || 
+                            err.message.includes('does not exist') || 
+                            err.message.includes('model_not_found') ||
+                            err.message.includes('not supported') ||
+                            err.message.includes('not have access')
+                        ));
+
+                    if (isModelUnavailable) {
+                        console.warn(`[Groq] Model ${modelCandidate} unavailable (${err.message}). Trying next candidate...`);
                         continue;
                     }
                     throw err;
