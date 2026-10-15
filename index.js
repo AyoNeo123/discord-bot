@@ -387,8 +387,10 @@ client.on('messageCreate', async message => {
         }
     }
 
-    // --- AI CHAT LOGIC ---
-    const isBotMentioned = message.mentions.has(client.user.id) || message.content.toLowerCase().includes('bunji bot');
+    // --- AI MODERATION & CHAT LOGIC (Admins + Natural Language) ---
+    const isBotMentioned = message.mentions.has(client.user.id) || 
+                          message.content.toLowerCase().includes('bunji bot') ||
+                          message.content.toLowerCase().includes('bunjibot');
 
     if (isBotMentioned) {
         // Ensure bot never replies in ignored categories
@@ -396,113 +398,74 @@ client.on('messageCreate', async message => {
         await message.channel.sendTyping();
 
         try {
-            // Remove the bot's mention from the prompt so it doesn't confuse the AI
-            const prompt = message.content.replace(`<@${client.user.id}>`, '').replace(/bunji bot/gi, '').trim();
+            if (!groq) {
+                await message.reply("⚠️ AI features are currently unavailable because `GROQ_API_KEY` is not configured.");
+                return;
+            }
 
-            // Check if user is admin
-            const isAdmin = message.member && message.member.roles.cache.has('1261617213325049936');
+            // Clean prompt
+            const prompt = message.content
+                .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
+                .replace(/bunji\s*bot/gi, '')
+                .trim();
 
-            // Define tools only if the user is an admin
+            // Verify if caller is admin/moderator
+            const isAdmin = message.member && (
+                message.member.permissions.has(PermissionFlagsBits.Administrator) ||
+                message.member.permissions.has(PermissionFlagsBits.ManageGuild) ||
+                message.member.permissions.has(PermissionFlagsBits.BanMembers) ||
+                message.member.permissions.has(PermissionFlagsBits.ModerateMembers) ||
+                message.member.roles.cache.has('1261617213325049936') ||
+                message.member.roles.cache.has('1373246947732885684') ||
+                LIMITED_STAFF_ROLES.some(roleId => message.member.roles.cache.has(roleId))
+            );
+
+            // Fetch replied-to message if any
+            let repliedMessageInfo = null;
+            if (message.reference && message.reference.messageId) {
+                try {
+                    const repliedMsg = await message.channel.messages.fetch(message.reference.messageId);
+                    if (repliedMsg) {
+                        repliedMessageInfo = {
+                            authorId: repliedMsg.author.id,
+                            authorTag: repliedMsg.author.tag,
+                            displayName: repliedMsg.member?.displayName || repliedMsg.author.username,
+                            content: repliedMsg.content || (repliedMsg.attachments.size > 0 ? '[attachment]' : '[embed]'),
+                            id: repliedMsg.id
+                        };
+                    }
+                } catch (e) {
+                    console.error("Could not fetch replied message:", e.message);
+                }
+            }
+
+            // Fetch recent channel chat history (last 15 messages)
+            let formattedHistory = [];
+            try {
+                const fetchedRecent = await message.channel.messages.fetch({ limit: 15 });
+                const sorted = Array.from(fetchedRecent.values())
+                    .filter(m => m.id !== message.id)
+                    .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+                formattedHistory = sorted.map(m => {
+                    const authorName = m.member?.displayName || m.author.username;
+                    return `[User: @${authorName} | ID: ${m.author.id}]: "${m.content.replace(/\n/g, ' ')}"`;
+                });
+            } catch (e) {
+                console.error("Could not fetch channel history:", e.message);
+            }
+
+            // Tools definitions for admins
             const tools = isAdmin ? [
                 {
                     type: "function",
                     function: {
-                        name: "delete_user_messages",
-                        description: "Delete the recent messages from a specific user in this channel.",
-                        parameters: {
-                            type: "object",
-                            properties: {
-                                userId: { type: "string", description: "The Discord user ID (extract numeric ID)." }
-                            },
-                            required: ["userId"]
-                        }
-                    }
-                },
-                {
-                    type: "function",
-                    function: {
-                        name: "add_user_role",
-                        description: "Add a specific role to a user in the server.",
-                        parameters: {
-                            type: "object",
-                            properties: {
-                                userId: { type: "string", description: "The Discord user ID (extract numeric ID)." },
-                                roleId: { type: "string", description: "The Discord role ID (extract numeric ID)." }
-                            },
-                            required: ["userId", "roleId"]
-                        }
-                    }
-                },
-                {
-                    type: "function",
-                    function: {
-                        name: "remove_user_role",
-                        description: "Remove a specific role from a user.",
-                        parameters: {
-                            type: "object",
-                            properties: {
-                                userId: { type: "string", description: "The Discord user ID (extract numeric ID)." },
-                                roleId: { type: "string", description: "The Discord role ID (extract numeric ID)." }
-                            },
-                            required: ["userId", "roleId"]
-                        }
-                    }
-                },
-                {
-                    type: "function",
-                    function: {
                         name: "ban_user",
-                        description: "Ban a user from the server.",
+                        description: "Ban a user from the Discord server. Call once per user if multiple users need to be banned.",
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The Discord user ID (extract numeric ID)." },
-                                reason: { type: "string", description: "The reason for the ban." }
-                            },
-                            required: ["userId"]
-                        }
-                    }
-                },
-                {
-                    type: "function",
-                    function: {
-                        name: "kick_user",
-                        description: "Kick a user from the server.",
-                        parameters: {
-                            type: "object",
-                            properties: {
-                                userId: { type: "string", description: "The Discord user ID (extract numeric ID)." },
-                                reason: { type: "string", description: "The reason for the kick." }
-                            },
-                            required: ["userId"]
-                        }
-                    }
-                },
-                {
-                    type: "function",
-                    function: {
-                        name: "timeout_user",
-                        description: "Timeout/mute a user for a specified duration in minutes.",
-                        parameters: {
-                            type: "object",
-                            properties: {
-                                userId: { type: "string", description: "The Discord user ID (extract numeric ID)." },
-                                durationMinutes: { type: "number", description: "Duration in minutes." },
-                                reason: { type: "string", description: "The reason for the timeout." }
-                            },
-                            required: ["userId", "durationMinutes"]
-                        }
-                    }
-                },
-                {
-                    type: "function",
-                    function: {
-                        name: "untimeout_user",
-                        description: "Remove a timeout from a user.",
-                        parameters: {
-                            type: "object",
-                            properties: {
-                                userId: { type: "string", description: "The Discord user ID (extract numeric ID)." }
+                                userId: { type: "string", description: "The target Discord user ID (numeric string only)." },
+                                reason: { type: "string", description: "Reason for the ban." }
                             },
                             required: ["userId"]
                         }
@@ -516,7 +479,7 @@ client.on('messageCreate', async message => {
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The Discord user ID (extract numeric ID)." }
+                                userId: { type: "string", description: "The Discord user ID to unban (numeric string only)." }
                             },
                             required: ["userId"]
                         }
@@ -525,8 +488,113 @@ client.on('messageCreate', async message => {
                 {
                     type: "function",
                     function: {
+                        name: "kick_user",
+                        description: "Kick a user from the Discord server.",
+                        parameters: {
+                            type: "object",
+                            properties: {
+                                userId: { type: "string", description: "The target Discord user ID (numeric string only)." },
+                                reason: { type: "string", description: "Reason for the kick." }
+                            },
+                            required: ["userId"]
+                        }
+                    }
+                },
+                {
+                    type: "function",
+                    function: {
+                        name: "timeout_user",
+                        description: "Timeout/mute a user for a duration in minutes. Call once per user if multiple users need to be muted/timed out.",
+                        parameters: {
+                            type: "object",
+                            properties: {
+                                userId: { type: "string", description: "The target Discord user ID (numeric string only)." },
+                                durationMinutes: { type: "number", description: "Duration in minutes (e.g. 5, 10, 60, 1440)." },
+                                reason: { type: "string", description: "Reason for the timeout." }
+                            },
+                            required: ["userId"]
+                        }
+                    }
+                },
+                {
+                    type: "function",
+                    function: {
+                        name: "untimeout_user",
+                        description: "Remove a timeout/mute from a user.",
+                        parameters: {
+                            type: "object",
+                            properties: {
+                                userId: { type: "string", description: "The Discord user ID (numeric string only)." }
+                            },
+                            required: ["userId"]
+                        }
+                    }
+                },
+                {
+                    type: "function",
+                    function: {
+                        name: "delete_recent_messages",
+                        description: "Delete recent messages in the current channel (purge).",
+                        parameters: {
+                            type: "object",
+                            properties: {
+                                count: { type: "number", description: "Number of messages to delete (1-100)." },
+                                userId: { type: "string", description: "Optional: Only delete messages from this specific user ID." }
+                            },
+                            required: ["count"]
+                        }
+                    }
+                },
+                {
+                    type: "function",
+                    function: {
+                        name: "warn_user",
+                        description: "Issue a formal warning to a user in the server.",
+                        parameters: {
+                            type: "object",
+                            properties: {
+                                userId: { type: "string", description: "The Discord user ID (numeric string only)." },
+                                reason: { type: "string", description: "Reason for the warning." }
+                            },
+                            required: ["userId", "reason"]
+                        }
+                    }
+                },
+                {
+                    type: "function",
+                    function: {
+                        name: "add_user_role",
+                        description: "Add a role to a user.",
+                        parameters: {
+                            type: "object",
+                            properties: {
+                                userId: { type: "string", description: "The Discord user ID." },
+                                roleId: { type: "string", description: "The Discord role ID." }
+                            },
+                            required: ["userId", "roleId"]
+                        }
+                    }
+                },
+                {
+                    type: "function",
+                    function: {
+                        name: "remove_user_role",
+                        description: "Remove a role from a user.",
+                        parameters: {
+                            type: "object",
+                            properties: {
+                                userId: { type: "string", description: "The Discord user ID." },
+                                roleId: { type: "string", description: "The Discord role ID." }
+                            },
+                            required: ["userId", "roleId"]
+                        }
+                    }
+                },
+                {
+                    type: "function",
+                    function: {
                         name: "lock_channel",
-                        description: "Lock the current channel so members cannot send messages.",
+                        description: "Lock the current channel so regular members cannot send messages.",
                         parameters: {
                             type: "object",
                             properties: {},
@@ -538,7 +606,7 @@ client.on('messageCreate', async message => {
                     type: "function",
                     function: {
                         name: "unlock_channel",
-                        description: "Unlock the current channel so members can send messages again.",
+                        description: "Unlock the current channel so regular members can send messages again.",
                         parameters: {
                             type: "object",
                             properties: {},
@@ -550,12 +618,12 @@ client.on('messageCreate', async message => {
                     type: "function",
                     function: {
                         name: "set_nickname",
-                        description: "Change the nickname of a user.",
+                        description: "Change the server nickname of a user.",
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The Discord user ID (extract numeric ID)." },
-                                nickname: { type: "string", description: "The new nickname for the user." }
+                                userId: { type: "string", description: "The Discord user ID." },
+                                nickname: { type: "string", description: "The new nickname." }
                             },
                             required: ["userId", "nickname"]
                         }
@@ -563,20 +631,36 @@ client.on('messageCreate', async message => {
                 }
             ] : undefined;
 
+            let systemPrompt = `You are BunjiBot, an intelligent Discord AI assistant with access to server moderation actions.
+Current Server Channel: #${message.channel.name}
+Caller: @${message.author.username} (ID: ${message.author.id})
+Caller Permission Level: ${isAdmin ? "VERIFIED ADMIN / MODERATOR" : "REGULAR MEMBER"}
+
+${repliedMessageInfo ? `REPLIED-TO MESSAGE CONTEXT:
+The admin is replying directly to this message:
+- Author: @${repliedMessageInfo.displayName} (${repliedMessageInfo.authorTag})
+- Author ID: ${repliedMessageInfo.authorId}
+- Message ID: ${repliedMessageInfo.id}
+- Content: "${repliedMessageInfo.content}"
+When the caller says "ban this guy", "mute him", "delete this", or refers to "this user/guy/person", the target is explicitly @${repliedMessageInfo.displayName} (ID: ${repliedMessageInfo.authorId}).` : "The caller is not replying to any specific message."}
+
+RECENT CHANNEL CHAT HISTORY (Oldest to Newest):
+${formattedHistory.length > 0 ? formattedHistory.join('\n') : "No recent messages available."}
+
+RULES:
+1. If the caller is a VERIFIED ADMIN / MODERATOR and asks you to moderate (ban, kick, mute/timeout, purge, warn, lock, role), convert their natural request into the appropriate tool calls immediately.
+2. If asked to moderate multiple users (e.g. "mute the last two people who spoke" or "ban both of them"), look at the chat history, identify the distinct user IDs, and invoke the tool for each target user.
+3. If the caller is a REGULAR MEMBER (not an admin) and asks for any moderation action, DO NOT call any tools. Politely inform them that only staff members can use moderation commands.
+4. If no moderation action is requested, reply politely and concisely.`;
+
             const chatMessages = [
-                {
-                    role: "system",
-                    content: "You are a helpful Discord bot. " + (isAdmin ? "You have access to moderation tools (ban, kick, timeout, roles, clear messages, lock channels) which you can execute when the user instructs you to. Only output the tool call if instructed to do an action." : "Keep your answers concise and conversational. Do not list admin or moderation commands since this user does not have permission to use them.") + " Always respond politely."
-                },
-                {
-                    role: "user",
-                    content: prompt || "Hello!"
-                }
+                { role: "system", content: systemPrompt },
+                { role: "user", content: prompt || "Hello" }
             ];
 
             const chatCompletion = await groq.chat.completions.create({
                 messages: chatMessages,
-                model: "openai/gpt-oss-20b",
+                model: "llama-3.3-70b-versatile",
                 tools: tools,
                 tool_choice: "auto",
             });
@@ -586,175 +670,159 @@ client.on('messageCreate', async message => {
 
             if (toolCalls && toolCalls.length > 0) {
                 for (const toolCall of toolCalls) {
-                    if (toolCall.function.name === 'delete_user_messages') {
+                    try {
                         const args = JSON.parse(toolCall.function.arguments);
-                        // Clean up the user ID just in case the AI includes the <@ > wrappers
-                        const targetUserId = args.userId.replace(/[^0-9]/g, '');
-                        
-                        try {
-                            const fetchedMessages = await message.channel.messages.fetch({ limit: 100 });
-                            const messagesToDelete = fetchedMessages.filter(m => m.author.id === targetUserId);
-                            
-                            if (messagesToDelete.size === 0) {
-                                await message.channel.send(`I couldn't find any recent messages from user <@${targetUserId}> in this channel.`);
-                            } else {
-                                // true = filter old messages (older than 14 days)
-                                await message.channel.bulkDelete(messagesToDelete, true); 
-                                await message.channel.send(`Successfully deleted ${messagesToDelete.size} recent messages from <@${targetUserId}>.`);
-                            }
-                        } catch (err) {
-                            console.error("Bulk delete error:", err);
+                        const cleanId = (id) => id ? String(id).replace(/[^0-9]/g, '') : '';
+
+                        if (toolCall.function.name === 'ban_user') {
+                            const targetUserId = cleanId(args.userId);
+                            const reason = args.reason || `Banned by AI on request of ${message.author.tag}`;
                             try {
-                                await message.channel.send("I encountered an error trying to delete those messages. Make sure I have 'Manage Messages' permission.");
-                            } catch (fallbackErr) {
-                                console.error("Could not send fallback error message:", fallbackErr);
+                                await message.guild.members.ban(targetUserId, { reason });
+                                await message.channel.send(`🔨 Successfully banned <@${targetUserId}>. Reason: **${reason}**`);
+                                savePunishment(targetUserId, 'BAN', reason, message.author.id);
+                            } catch (err) {
+                                console.error("Ban error:", err);
+                                await message.channel.send(`❌ Failed to ban <@${targetUserId}>: ${err.message}`).catch(()=>{});
+                            }
+                        } else if (toolCall.function.name === 'unban_user') {
+                            const targetUserId = cleanId(args.userId);
+                            try {
+                                await message.guild.members.unban(targetUserId, `Unbanned by AI on request of ${message.author.tag}`);
+                                await message.channel.send(`✅ Successfully unbanned <@${targetUserId}>.`);
+                            } catch (err) {
+                                console.error("Unban error:", err);
+                                await message.channel.send(`❌ Failed to unban <@${targetUserId}>: ${err.message}`).catch(()=>{});
+                            }
+                        } else if (toolCall.function.name === 'kick_user') {
+                            const targetUserId = cleanId(args.userId);
+                            const reason = args.reason || `Kicked by AI on request of ${message.author.tag}`;
+                            try {
+                                const member = await message.guild.members.fetch(targetUserId);
+                                await member.kick(reason);
+                                await message.channel.send(`👢 Successfully kicked <@${targetUserId}>. Reason: **${reason}**`);
+                                savePunishment(targetUserId, 'KICK', reason, message.author.id);
+                            } catch (err) {
+                                console.error("Kick error:", err);
+                                await message.channel.send(`❌ Failed to kick <@${targetUserId}>: ${err.message}`).catch(()=>{});
+                            }
+                        } else if (toolCall.function.name === 'timeout_user') {
+                            const targetUserId = cleanId(args.userId);
+                            const durationMinutes = Math.max(1, parseInt(args.durationMinutes) || 10);
+                            const durationMs = durationMinutes * 60 * 1000;
+                            const reason = args.reason || `Timed out by AI on request of ${message.author.tag}`;
+                            try {
+                                const member = await message.guild.members.fetch(targetUserId);
+                                await member.timeout(durationMs, reason);
+                                await message.channel.send(`⏳ Successfully muted/timed out <@${targetUserId}> for **${durationMinutes} minute(s)**. Reason: **${reason}**`);
+                                savePunishment(targetUserId, 'TIMEOUT', reason, message.author.id, `${durationMinutes}m`);
+                            } catch (err) {
+                                console.error("Timeout error:", err);
+                                await message.channel.send(`❌ Failed to timeout <@${targetUserId}>: ${err.message}`).catch(()=>{});
+                            }
+                        } else if (toolCall.function.name === 'untimeout_user') {
+                            const targetUserId = cleanId(args.userId);
+                            try {
+                                const member = await message.guild.members.fetch(targetUserId);
+                                await member.timeout(null, `Timeout removed by AI on request of ${message.author.tag}`);
+                                await message.channel.send(`✅ Successfully removed timeout/mute from <@${targetUserId}>.`);
+                            } catch (err) {
+                                console.error("Untimeout error:", err);
+                                await message.channel.send(`❌ Failed to remove timeout from <@${targetUserId}>: ${err.message}`).catch(()=>{});
+                            }
+                        } else if (toolCall.function.name === 'delete_recent_messages') {
+                            const count = Math.min(Math.max(parseInt(args.count) || 5, 1), 100);
+                            const targetUserId = cleanId(args.userId);
+                            try {
+                                const fetched = await message.channel.messages.fetch({ limit: Math.min(count + 5, 100) });
+                                let toDelete = fetched.filter(m => m.id !== message.id);
+                                if (targetUserId) {
+                                    toDelete = toDelete.filter(m => m.author.id === targetUserId);
+                                }
+                                toDelete = Array.from(toDelete.values()).slice(0, count);
+                                if (toDelete.length > 0) {
+                                    await message.channel.bulkDelete(toDelete, true);
+                                    await message.channel.send(`🧹 Successfully deleted **${toDelete.length}** messages${targetUserId ? ` from <@${targetUserId}>` : ''}.`);
+                                } else {
+                                    await message.channel.send(`No matching recent messages found to delete.`);
+                                }
+                            } catch (err) {
+                                console.error("Bulk delete error:", err);
+                                await message.channel.send(`❌ Failed to delete messages: ${err.message}`).catch(()=>{});
+                            }
+                        } else if (toolCall.function.name === 'warn_user') {
+                            const targetUserId = cleanId(args.userId);
+                            const reason = args.reason || `Warned by AI on request of ${message.author.tag}`;
+                            savePunishment(targetUserId, 'WARN', reason, message.author.id);
+                            await message.channel.send(`⚠️ <@${targetUserId}> has been warned. Reason: **${reason}**`);
+                        } else if (toolCall.function.name === 'add_user_role') {
+                            const targetUserId = cleanId(args.userId);
+                            const targetRoleId = cleanId(args.roleId);
+                            try {
+                                const member = await message.guild.members.fetch(targetUserId);
+                                await member.roles.add(targetRoleId);
+                                await message.channel.send(`✅ Successfully added role <@&${targetRoleId}> to <@${targetUserId}>.`);
+                            } catch (err) {
+                                console.error("Add role error:", err);
+                                await message.channel.send(`❌ Failed to add role: ${err.message}`).catch(()=>{});
+                            }
+                        } else if (toolCall.function.name === 'remove_user_role') {
+                            const targetUserId = cleanId(args.userId);
+                            const targetRoleId = cleanId(args.roleId);
+                            try {
+                                const member = await message.guild.members.fetch(targetUserId);
+                                await member.roles.remove(targetRoleId);
+                                await message.channel.send(`✅ Successfully removed role <@&${targetRoleId}> from <@${targetUserId}>.`);
+                            } catch (err) {
+                                console.error("Remove role error:", err);
+                                await message.channel.send(`❌ Failed to remove role: ${err.message}`).catch(()=>{});
+                            }
+                        } else if (toolCall.function.name === 'lock_channel') {
+                            try {
+                                await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, { SendMessages: false });
+                                await message.channel.send(`🔒 Channel has been locked.`);
+                            } catch (err) {
+                                console.error("Lock error:", err);
+                                await message.channel.send(`❌ Failed to lock channel: ${err.message}`).catch(()=>{});
+                            }
+                        } else if (toolCall.function.name === 'unlock_channel') {
+                            try {
+                                await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, { SendMessages: null });
+                                await message.channel.send(`🔓 Channel has been unlocked.`);
+                            } catch (err) {
+                                console.error("Unlock error:", err);
+                                await message.channel.send(`❌ Failed to unlock channel: ${err.message}`).catch(()=>{});
+                            }
+                        } else if (toolCall.function.name === 'set_nickname') {
+                            const targetUserId = cleanId(args.userId);
+                            const nickname = args.nickname;
+                            try {
+                                const member = await message.guild.members.fetch(targetUserId);
+                                await member.setNickname(nickname);
+                                await message.channel.send(`✅ Changed <@${targetUserId}>'s nickname to **${nickname}**.`);
+                            } catch (err) {
+                                console.error("Nickname error:", err);
+                                await message.channel.send(`❌ Failed to change nickname: ${err.message}`).catch(()=>{});
                             }
                         }
-                    } else if (toolCall.function.name === 'add_user_role') {
-                        const args = JSON.parse(toolCall.function.arguments);
-                        const targetUserId = args.userId.replace(/[^0-9]/g, '');
-                        const targetRoleId = args.roleId.replace(/[^0-9]/g, '');
-
-                        try {
-                            const member = await message.guild.members.fetch(targetUserId);
-                            await member.roles.add(targetRoleId);
-                            await message.channel.send(`✅ Successfully added the role to <@${targetUserId}>.`);
-                        } catch (err) {
-                            console.error("Add role error:", err);
-                            await message.channel.send(`❌ Failed to add role. Check my permissions and role hierarchy.`).catch(()=>{});
-                        }
-                    } else if (toolCall.function.name === 'remove_user_role') {
-                        const args = JSON.parse(toolCall.function.arguments);
-                        const targetUserId = args.userId.replace(/[^0-9]/g, '');
-                        const targetRoleId = args.roleId.replace(/[^0-9]/g, '');
-
-                        try {
-                            const member = await message.guild.members.fetch(targetUserId);
-                            await member.roles.remove(targetRoleId);
-                            await message.channel.send(`✅ Successfully removed the role from <@${targetUserId}>.`);
-                        } catch (err) {
-                            console.error("Remove role error:", err);
-                            await message.channel.send(`❌ Failed to remove role. Check my permissions.`).catch(()=>{});
-                        }
-                    } else if (toolCall.function.name === 'ban_user') {
-                        const args = JSON.parse(toolCall.function.arguments);
-                        const targetUserId = args.userId.replace(/[^0-9]/g, '');
-                        const reason = args.reason || "Banned by AI";
-
-                        try {
-                            await message.guild.members.ban(targetUserId, { reason });
-                            await message.channel.send(`✅ Successfully banned <@${targetUserId}> for: ${reason}`);
-                            savePunishment(targetUserId, 'BAN', reason, message.author.id);
-                        } catch (err) {
-                            console.error("Ban error:", err);
-                            await message.channel.send(`❌ Failed to ban. Check my permissions and role hierarchy.`).catch(()=>{});
-                        }
-                    } else if (toolCall.function.name === 'kick_user') {
-                        const args = JSON.parse(toolCall.function.arguments);
-                        const targetUserId = args.userId.replace(/[^0-9]/g, '');
-                        const reason = args.reason || "Kicked by AI";
-
-                        try {
-                            const member = await message.guild.members.fetch(targetUserId);
-                            await member.kick(reason);
-                            await message.channel.send(`✅ Successfully kicked <@${targetUserId}> for: ${reason}`);
-                            savePunishment(targetUserId, 'KICK', reason, message.author.id);
-                        } catch (err) {
-                            console.error("Kick error:", err);
-                            await message.channel.send(`❌ Failed to kick. Check my permissions.`).catch(()=>{});
-                        }
-                    } else if (toolCall.function.name === 'timeout_user') {
-                        const args = JSON.parse(toolCall.function.arguments);
-                        const targetUserId = args.userId.replace(/[^0-9]/g, '');
-                        const durationMinutes = args.durationMinutes || 10;
-                        const reason = args.reason || "Timed out by AI";
-                        const durationMs = durationMinutes * 60 * 1000;
-
-                        try {
-                            const member = await message.guild.members.fetch(targetUserId);
-                            await member.timeout(durationMs, reason);
-                            await message.channel.send(`✅ Successfully timed out <@${targetUserId}> for ${durationMinutes} minutes. Reason: ${reason}`);
-                            savePunishment(targetUserId, 'TIMEOUT', reason, message.author.id, `${durationMinutes}m`);
-                        } catch (err) {
-                            console.error("Timeout error:", err);
-                            await message.channel.send(`❌ Failed to timeout. Check my permissions.`).catch(()=>{});
-                        }
-                    } else if (toolCall.function.name === 'untimeout_user') {
-                        const args = JSON.parse(toolCall.function.arguments);
-                        const targetUserId = args.userId.replace(/[^0-9]/g, '');
-
-                        try {
-                            const member = await message.guild.members.fetch(targetUserId);
-                            await member.timeout(null, "Untimed out by AI");
-                            await message.channel.send(`✅ Successfully removed timeout from <@${targetUserId}>.`);
-                        } catch (err) {
-                            console.error("Untimeout error:", err);
-                            await message.channel.send(`❌ Failed to untimeout. Check my permissions.`).catch(()=>{});
-                        }
-                    } else if (toolCall.function.name === 'unban_user') {
-                        const args = JSON.parse(toolCall.function.arguments);
-                        const targetUserId = args.userId.replace(/[^0-9]/g, '');
-
-                        try {
-                            await message.guild.members.unban(targetUserId, "Unbanned by AI");
-                            await message.channel.send(`✅ Successfully unbanned <@${targetUserId}>.`);
-                        } catch (err) {
-                            console.error("Unban error:", err);
-                            await message.channel.send(`❌ Failed to unban. Ensure the user is actually banned.`).catch(()=>{});
-                        }
-                    } else if (toolCall.function.name === 'lock_channel') {
-                        try {
-                            const everyoneRole = message.guild.roles.everyone;
-                            await message.channel.permissionOverwrites.edit(everyoneRole, { SendMessages: false });
-                            await message.channel.send(`✅ Channel has been locked. 🔒`);
-                        } catch (err) {
-                            console.error("Lock error:", err);
-                            await message.channel.send(`❌ Failed to lock channel.`).catch(()=>{});
-                        }
-                    } else if (toolCall.function.name === 'unlock_channel') {
-                        try {
-                            const everyoneRole = message.guild.roles.everyone;
-                            await message.channel.permissionOverwrites.edit(everyoneRole, { SendMessages: null });
-                            await message.channel.send(`✅ Channel has been unlocked. 🔓`);
-                        } catch (err) {
-                            console.error("Unlock error:", err);
-                            await message.channel.send(`❌ Failed to unlock channel.`).catch(()=>{});
-                        }
-                    } else if (toolCall.function.name === 'set_nickname') {
-                        const args = JSON.parse(toolCall.function.arguments);
-                        const targetUserId = args.userId.replace(/[^0-9]/g, '');
-                        const nickname = args.nickname;
-
-                        try {
-                            const member = await message.guild.members.fetch(targetUserId);
-                            await member.setNickname(nickname);
-                            await message.channel.send(`✅ Successfully changed <@${targetUserId}>'s nickname to \`${nickname}\`.`);
-                        } catch (err) {
-                            console.error("Set nickname error:", err);
-                            await message.channel.send(`❌ Failed to change nickname. Check my permissions.`).catch(()=>{});
-                        }
+                    } catch (parseErr) {
+                        console.error("Tool execution error:", parseErr);
                     }
                 }
             } else {
-                // Just a normal chat reply
-                let replyContent = responseMessage?.content || "Sorry, I couldn't think of a response!";
-                
-                // Prevent prompt-injected command execution (prefix a zero-width space if it starts with a command prefix)
+                let replyContent = responseMessage?.content || "Sorry, I couldn't process that.";
                 if (/^[?!/.\-]/.test(replyContent)) {
                     replyContent = '\u200B' + replyContent;
                 }
-
                 await message.reply({ 
                     content: replyContent, 
                     allowedMentions: { parse: [], repliedUser: true } 
                 });
             }
         } catch (error) {
-            console.error("Error with Groq API:", error);
-            await message.reply("Sorry, my AI brain is currently experiencing issues!");
+            console.error("AI Assistant Error:", error);
+            await message.reply(`⚠️ AI Error: ${error.message || 'Unable to process request.'}`).catch(()=>{});
         }
-        
-        // Return early so we don't trigger the other keyword checks
         return;
     }
 
