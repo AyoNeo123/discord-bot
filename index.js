@@ -268,7 +268,13 @@ const client = new Client({
     partials: [Partials.Channel]
 });
 
-client.on('debug', console.log);
+global.discordDebugLogs = [];
+client.on('debug', info => {
+    console.log(info);
+    if (!global.discordDebugLogs) global.discordDebugLogs = [];
+    global.discordDebugLogs.push(`[${new Date().toISOString().split('T')[1].slice(0, 8)}] ${info}`);
+    if (global.discordDebugLogs.length > 25) global.discordDebugLogs.shift();
+});
 
 // When the client is ready, run this code (only once)
 client.once('ready', () => {
@@ -3835,8 +3841,37 @@ const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => {
+async function checkDiscordGateway(token) {
+    if (!token) return { status: 'no_token', error: 'DISCORD_TOKEN is missing' };
+    const cleanToken = token.trim().replace(/^["']|["']$/g, '');
+    try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 6000);
+        const start = Date.now();
+        const res = await fetch('https://discord.com/api/v10/gateway/bot', {
+            headers: { Authorization: `Bot ${cleanToken}` },
+            signal: controller.signal
+        });
+        clearTimeout(timer);
+        const latency = Date.now() - start;
+        const bodyText = await res.text();
+        let json = null;
+        try { json = JSON.parse(bodyText); } catch (_) {}
+        return {
+            httpStatus: res.status,
+            latencyMs: latency,
+            data: json || bodyText
+        };
+    } catch (e) {
+        return {
+            error: e.name === 'AbortError' ? 'Timeout reaching discord.com/api/v10/gateway/bot after 6s (Render outbound connection blocked or slow)' : e.message
+        };
+    }
+}
+
+app.get('/', async (req, res) => {
     const isReady = client && client.isReady();
+    const gatewayCheck = await checkDiscordGateway(process.env.DISCORD_TOKEN);
     res.json({
         webServer: "ONLINE",
         discordBot: isReady ? "ONLINE" : "OFFLINE",
@@ -3849,7 +3884,9 @@ app.get('/', (req, res) => {
             tokenLength: process.env.DISCORD_TOKEN ? process.env.DISCORD_TOKEN.trim().length : 0,
             hasGroqApiKey: !!process.env.GROQ_API_KEY
         },
+        gatewayApiCheck: gatewayCheck,
         lastError: global.lastDiscordError || null,
+        recentDebugLogs: global.discordDebugLogs || [],
         uptimeSeconds: Math.floor(process.uptime())
     });
 });
