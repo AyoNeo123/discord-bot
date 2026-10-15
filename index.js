@@ -387,6 +387,68 @@ client.on('messageCreate', async message => {
         }
     }
 
+    // --- HELPER: RESOLVE USER BY NAME, NICKNAME, OR ID ---
+    async function resolveTargetMember(query, guild) {
+        if (!query || !guild) return null;
+        const cleanStr = String(query).trim();
+
+        // 1. Direct numeric ID match or mention (<@123456789...>)
+        const idMatch = cleanStr.match(/\d{17,20}/);
+        if (idMatch) {
+            const byId = await guild.members.fetch(idMatch[0]).catch(() => null);
+            if (byId) return byId;
+        }
+
+        // 2. Clean possessive 's, trailing slang, or punctuation (e.g. "tavoids" -> "tavoid", "john's" -> "john")
+        let searchTerm = cleanStr
+            .replace(/['’]s$/i, '')
+            .replace(/^@/, '')
+            .replace(/[.,!?;:'"()[\]{}]/g, '')
+            .trim()
+            .toLowerCase();
+
+        if (!searchTerm) searchTerm = cleanStr.toLowerCase();
+
+        // 3. Search cached members
+        const cached = Array.from(guild.members.cache.values());
+        
+        let found = cached.find(m => 
+            m.user.username.toLowerCase() === searchTerm ||
+            m.displayName.toLowerCase() === searchTerm ||
+            (m.nickname && m.nickname.toLowerCase() === searchTerm) ||
+            m.user.tag.toLowerCase() === searchTerm
+        );
+        if (found) return found;
+
+        found = cached.find(m => 
+            m.user.username.toLowerCase().startsWith(searchTerm) ||
+            m.displayName.toLowerCase().startsWith(searchTerm)
+        );
+        if (found) return found;
+
+        found = cached.find(m => 
+            m.user.username.toLowerCase().includes(searchTerm) ||
+            m.displayName.toLowerCase().includes(searchTerm)
+        );
+        if (found) return found;
+
+        // 4. REST search on guild members
+        try {
+            const searchResults = await guild.members.search({ query: searchTerm, limit: 10 });
+            if (searchResults && searchResults.size > 0) {
+                const exactInSearch = searchResults.find(m => 
+                    m.user.username.toLowerCase() === searchTerm ||
+                    m.displayName.toLowerCase() === searchTerm
+                );
+                return exactInSearch || searchResults.first();
+            }
+        } catch (e) {
+            console.error("Guild member search error:", e.message);
+        }
+
+        return null;
+    }
+
     // --- AI MODERATION & CHAT LOGIC (Admins + Natural Language) ---
     const isBotMentioned = message.mentions.has(client.user.id) || 
                           message.content.toLowerCase().includes('bunji bot') ||
@@ -460,14 +522,14 @@ client.on('messageCreate', async message => {
                     type: "function",
                     function: {
                         name: "ban_user",
-                        description: "Ban a user from the Discord server. Call once per user if multiple users need to be banned.",
+                        description: "Ban a user from the Discord server. 'target' can be a username (e.g. 'tavoid'), a nickname, a mention, or a numeric user ID. Call once per user if multiple users need to be banned.",
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The target Discord user ID (numeric string only)." },
+                                target: { type: "string", description: "The username, nickname, mention, or numeric user ID of the target." },
                                 reason: { type: "string", description: "Reason for the ban." }
                             },
-                            required: ["userId"]
+                            required: ["target"]
                         }
                     }
                 },
@@ -475,13 +537,13 @@ client.on('messageCreate', async message => {
                     type: "function",
                     function: {
                         name: "unban_user",
-                        description: "Unban a user from the server.",
+                        description: "Unban a user from the server by username or user ID.",
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The Discord user ID to unban (numeric string only)." }
+                                target: { type: "string", description: "The username, mention, or numeric user ID to unban." }
                             },
-                            required: ["userId"]
+                            required: ["target"]
                         }
                     }
                 },
@@ -489,14 +551,14 @@ client.on('messageCreate', async message => {
                     type: "function",
                     function: {
                         name: "kick_user",
-                        description: "Kick a user from the Discord server.",
+                        description: "Kick a user from the Discord server by username, nickname, or user ID.",
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The target Discord user ID (numeric string only)." },
+                                target: { type: "string", description: "The username, nickname, mention, or numeric user ID." },
                                 reason: { type: "string", description: "Reason for the kick." }
                             },
-                            required: ["userId"]
+                            required: ["target"]
                         }
                     }
                 },
@@ -504,15 +566,15 @@ client.on('messageCreate', async message => {
                     type: "function",
                     function: {
                         name: "timeout_user",
-                        description: "Timeout/mute a user for a duration in minutes. Call once per user if multiple users need to be muted/timed out.",
+                        description: "Timeout/mute a user for a duration in minutes. 'target' can be a username, nickname, mention, or numeric user ID. Call once per user if multiple users need to be muted/timed out.",
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The target Discord user ID (numeric string only)." },
+                                target: { type: "string", description: "The username, nickname, mention, or numeric user ID." },
                                 durationMinutes: { type: "number", description: "Duration in minutes (e.g. 5, 10, 60, 1440)." },
                                 reason: { type: "string", description: "Reason for the timeout." }
                             },
-                            required: ["userId"]
+                            required: ["target"]
                         }
                     }
                 },
@@ -520,13 +582,13 @@ client.on('messageCreate', async message => {
                     type: "function",
                     function: {
                         name: "untimeout_user",
-                        description: "Remove a timeout/mute from a user.",
+                        description: "Remove a timeout/mute from a user by username, nickname, or user ID.",
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The Discord user ID (numeric string only)." }
+                                target: { type: "string", description: "The username, nickname, mention, or numeric user ID." }
                             },
-                            required: ["userId"]
+                            required: ["target"]
                         }
                     }
                 },
@@ -539,7 +601,7 @@ client.on('messageCreate', async message => {
                             type: "object",
                             properties: {
                                 count: { type: "number", description: "Number of messages to delete (1-100)." },
-                                userId: { type: "string", description: "Optional: Only delete messages from this specific user ID." }
+                                target: { type: "string", description: "Optional: Only delete messages from this username or user ID." }
                             },
                             required: ["count"]
                         }
@@ -549,14 +611,14 @@ client.on('messageCreate', async message => {
                     type: "function",
                     function: {
                         name: "warn_user",
-                        description: "Issue a formal warning to a user in the server.",
+                        description: "Issue a formal warning to a user in the server by username, nickname, or user ID.",
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The Discord user ID (numeric string only)." },
+                                target: { type: "string", description: "The username, nickname, mention, or numeric user ID." },
                                 reason: { type: "string", description: "Reason for the warning." }
                             },
-                            required: ["userId", "reason"]
+                            required: ["target", "reason"]
                         }
                     }
                 },
@@ -568,10 +630,10 @@ client.on('messageCreate', async message => {
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The Discord user ID." },
+                                target: { type: "string", description: "The username, nickname, or user ID." },
                                 roleId: { type: "string", description: "The Discord role ID." }
                             },
-                            required: ["userId", "roleId"]
+                            required: ["target", "roleId"]
                         }
                     }
                 },
@@ -583,10 +645,10 @@ client.on('messageCreate', async message => {
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The Discord user ID." },
+                                target: { type: "string", description: "The username, nickname, or user ID." },
                                 roleId: { type: "string", description: "The Discord role ID." }
                             },
-                            required: ["userId", "roleId"]
+                            required: ["target", "roleId"]
                         }
                     }
                 },
@@ -622,10 +684,10 @@ client.on('messageCreate', async message => {
                         parameters: {
                             type: "object",
                             properties: {
-                                userId: { type: "string", description: "The Discord user ID." },
+                                target: { type: "string", description: "The username, nickname, or user ID." },
                                 nickname: { type: "string", description: "The new nickname." }
                             },
-                            required: ["userId", "nickname"]
+                            required: ["target", "nickname"]
                         }
                     }
                 }
@@ -647,11 +709,14 @@ When the caller says "ban this guy", "mute him", "delete this", or refers to "th
 RECENT CHANNEL CHAT HISTORY (Oldest to Newest):
 ${formattedHistory.length > 0 ? formattedHistory.join('\n') : "No recent messages available."}
 
-RULES:
-1. If the caller is a VERIFIED ADMIN / MODERATOR and asks you to moderate (ban, kick, mute/timeout, purge, warn, lock, role), convert their natural request into the appropriate tool calls immediately.
-2. If asked to moderate multiple users (e.g. "mute the last two people who spoke" or "ban both of them"), look at the chat history, identify the distinct user IDs, and invoke the tool for each target user.
-3. If the caller is a REGULAR MEMBER (not an admin) and asks for any moderation action, DO NOT call any tools. Politely inform them that only staff members can use moderation commands.
-4. If no moderation action is requested, reply politely and concisely.`;
+INSTRUCTIONS FOR USER & NAME RESOLUTION:
+1. Admins will often specify targets by username or nickname WITHOUT pinging them (e.g. "ban tavoids bitch ass", "mute john for 10m", "kick alex").
+   - Extract the target name cleanly (e.g. from "ban tavoids bitch ass", the target is "tavoid").
+   - Pass that username, nickname, or ID into the 'target' argument.
+2. If the admin is replying to someone's message and says "ban this guy" or "mute them", use the replied-to message author ID as the target.
+3. If asked to moderate multiple users (e.g. "mute the last two people who spoke"), look at the chat history, identify the distinct target users who spoke before the admin, and invoke the tool for each target user.
+4. If the caller is a REGULAR MEMBER (not an admin) and asks for any moderation action, DO NOT call any tools. Inform them that only staff members can use moderation commands.
+5. If no moderation action is requested, reply politely and concisely.`;
 
             const chatMessages = [
                 { role: "system", content: systemPrompt },
@@ -696,21 +761,40 @@ RULES:
                 for (const toolCall of toolCalls) {
                     try {
                         const args = JSON.parse(toolCall.function.arguments);
-                        const cleanId = (id) => id ? String(id).replace(/[^0-9]/g, '') : '';
+                        const targetQuery = args.target || args.userId;
+                        let member = null;
+                        let targetUserId = null;
+
+                        if (targetQuery) {
+                            member = await resolveTargetMember(targetQuery, message.guild);
+                            if (member) {
+                                targetUserId = member.id;
+                            } else {
+                                const idMatch = String(targetQuery).match(/\d{17,20}/);
+                                if (idMatch) targetUserId = idMatch[0];
+                            }
+                        }
 
                         if (toolCall.function.name === 'ban_user') {
-                            const targetUserId = cleanId(args.userId);
+                            if (!targetUserId) {
+                                await message.channel.send(`❌ Could not find user matching **"${targetQuery}"** to ban.`);
+                                continue;
+                            }
                             const reason = args.reason || `Banned by AI on request of ${message.author.tag}`;
                             try {
                                 await message.guild.members.ban(targetUserId, { reason });
-                                await message.channel.send(`🔨 Successfully banned <@${targetUserId}>. Reason: **${reason}**`);
+                                const nameDisplay = member ? `**${member.user.tag}** (<@${targetUserId}>)` : `<@${targetUserId}>`;
+                                await message.channel.send(`🔨 Successfully banned ${nameDisplay}. Reason: **${reason}**`);
                                 savePunishment(targetUserId, 'BAN', reason, message.author.id);
                             } catch (err) {
                                 console.error("Ban error:", err);
                                 await message.channel.send(`❌ Failed to ban <@${targetUserId}>: ${err.message}`).catch(()=>{});
                             }
                         } else if (toolCall.function.name === 'unban_user') {
-                            const targetUserId = cleanId(args.userId);
+                            if (!targetUserId) {
+                                await message.channel.send(`❌ Could not find user matching **"${targetQuery}"** to unban.`);
+                                continue;
+                            }
                             try {
                                 await message.guild.members.unban(targetUserId, `Unbanned by AI on request of ${message.author.tag}`);
                                 await message.channel.send(`✅ Successfully unbanned <@${targetUserId}>.`);
@@ -719,44 +803,66 @@ RULES:
                                 await message.channel.send(`❌ Failed to unban <@${targetUserId}>: ${err.message}`).catch(()=>{});
                             }
                         } else if (toolCall.function.name === 'kick_user') {
-                            const targetUserId = cleanId(args.userId);
+                            if (!targetUserId) {
+                                await message.channel.send(`❌ Could not find user matching **"${targetQuery}"** to kick.`);
+                                continue;
+                            }
                             const reason = args.reason || `Kicked by AI on request of ${message.author.tag}`;
                             try {
-                                const member = await message.guild.members.fetch(targetUserId);
-                                await member.kick(reason);
-                                await message.channel.send(`👢 Successfully kicked <@${targetUserId}>. Reason: **${reason}**`);
+                                const targetMember = member || await message.guild.members.fetch(targetUserId).catch(() => null);
+                                if (!targetMember) {
+                                    await message.channel.send(`❌ User <@${targetUserId}> is not currently in this server.`);
+                                    continue;
+                                }
+                                await targetMember.kick(reason);
+                                const nameDisplay = `**${targetMember.user.tag}** (<@${targetUserId}>)`;
+                                await message.channel.send(`👢 Successfully kicked ${nameDisplay}. Reason: **${reason}**`);
                                 savePunishment(targetUserId, 'KICK', reason, message.author.id);
                             } catch (err) {
                                 console.error("Kick error:", err);
                                 await message.channel.send(`❌ Failed to kick <@${targetUserId}>: ${err.message}`).catch(()=>{});
                             }
                         } else if (toolCall.function.name === 'timeout_user') {
-                            const targetUserId = cleanId(args.userId);
+                            if (!targetUserId) {
+                                await message.channel.send(`❌ Could not find user matching **"${targetQuery}"** to timeout.`);
+                                continue;
+                            }
                             const durationMinutes = Math.max(1, parseInt(args.durationMinutes) || 10);
                             const durationMs = durationMinutes * 60 * 1000;
                             const reason = args.reason || `Timed out by AI on request of ${message.author.tag}`;
                             try {
-                                const member = await message.guild.members.fetch(targetUserId);
-                                await member.timeout(durationMs, reason);
-                                await message.channel.send(`⏳ Successfully muted/timed out <@${targetUserId}> for **${durationMinutes} minute(s)**. Reason: **${reason}**`);
+                                const targetMember = member || await message.guild.members.fetch(targetUserId).catch(() => null);
+                                if (!targetMember) {
+                                    await message.channel.send(`❌ User <@${targetUserId}> is not currently in this server.`);
+                                    continue;
+                                }
+                                await targetMember.timeout(durationMs, reason);
+                                const nameDisplay = `**${targetMember.user.tag}** (<@${targetUserId}>)`;
+                                await message.channel.send(`⏳ Successfully muted/timed out ${nameDisplay} for **${durationMinutes} minute(s)**. Reason: **${reason}**`);
                                 savePunishment(targetUserId, 'TIMEOUT', reason, message.author.id, `${durationMinutes}m`);
                             } catch (err) {
                                 console.error("Timeout error:", err);
                                 await message.channel.send(`❌ Failed to timeout <@${targetUserId}>: ${err.message}`).catch(()=>{});
                             }
                         } else if (toolCall.function.name === 'untimeout_user') {
-                            const targetUserId = cleanId(args.userId);
+                            if (!targetUserId) {
+                                await message.channel.send(`❌ Could not find user matching **"${targetQuery}"**.`);
+                                continue;
+                            }
                             try {
-                                const member = await message.guild.members.fetch(targetUserId);
-                                await member.timeout(null, `Timeout removed by AI on request of ${message.author.tag}`);
-                                await message.channel.send(`✅ Successfully removed timeout/mute from <@${targetUserId}>.`);
+                                const targetMember = member || await message.guild.members.fetch(targetUserId).catch(() => null);
+                                if (!targetMember) {
+                                    await message.channel.send(`❌ User <@${targetUserId}> is not currently in this server.`);
+                                    continue;
+                                }
+                                await targetMember.timeout(null, `Timeout removed by AI on request of ${message.author.tag}`);
+                                await message.channel.send(`✅ Successfully removed timeout/mute from **${targetMember.user.tag}**.`);
                             } catch (err) {
                                 console.error("Untimeout error:", err);
                                 await message.channel.send(`❌ Failed to remove timeout from <@${targetUserId}>: ${err.message}`).catch(()=>{});
                             }
                         } else if (toolCall.function.name === 'delete_recent_messages') {
                             const count = Math.min(Math.max(parseInt(args.count) || 5, 1), 100);
-                            const targetUserId = cleanId(args.userId);
                             try {
                                 const fetched = await message.channel.messages.fetch({ limit: Math.min(count + 5, 100) });
                                 let toDelete = fetched.filter(m => m.id !== message.id);
@@ -775,28 +881,38 @@ RULES:
                                 await message.channel.send(`❌ Failed to delete messages: ${err.message}`).catch(()=>{});
                             }
                         } else if (toolCall.function.name === 'warn_user') {
-                            const targetUserId = cleanId(args.userId);
+                            if (!targetUserId) {
+                                await message.channel.send(`❌ Could not find user matching **"${targetQuery}"** to warn.`);
+                                continue;
+                            }
                             const reason = args.reason || `Warned by AI on request of ${message.author.tag}`;
                             savePunishment(targetUserId, 'WARN', reason, message.author.id);
-                            await message.channel.send(`⚠️ <@${targetUserId}> has been warned. Reason: **${reason}**`);
+                            const nameDisplay = member ? `**${member.user.tag}** (<@${targetUserId}>)` : `<@${targetUserId}>`;
+                            await message.channel.send(`⚠️ ${nameDisplay} has been warned. Reason: **${reason}**`);
                         } else if (toolCall.function.name === 'add_user_role') {
-                            const targetUserId = cleanId(args.userId);
-                            const targetRoleId = cleanId(args.roleId);
+                            if (!targetUserId) {
+                                await message.channel.send(`❌ Could not find user matching **"${targetQuery}"**.`);
+                                continue;
+                            }
+                            const targetRoleId = String(args.roleId).replace(/[^0-9]/g, '');
                             try {
-                                const member = await message.guild.members.fetch(targetUserId);
-                                await member.roles.add(targetRoleId);
-                                await message.channel.send(`✅ Successfully added role <@&${targetRoleId}> to <@${targetUserId}>.`);
+                                const targetMember = member || await message.guild.members.fetch(targetUserId);
+                                await targetMember.roles.add(targetRoleId);
+                                await message.channel.send(`✅ Successfully added role <@&${targetRoleId}> to **${targetMember.user.tag}**.`);
                             } catch (err) {
                                 console.error("Add role error:", err);
                                 await message.channel.send(`❌ Failed to add role: ${err.message}`).catch(()=>{});
                             }
                         } else if (toolCall.function.name === 'remove_user_role') {
-                            const targetUserId = cleanId(args.userId);
-                            const targetRoleId = cleanId(args.roleId);
+                            if (!targetUserId) {
+                                await message.channel.send(`❌ Could not find user matching **"${targetQuery}"**.`);
+                                continue;
+                            }
+                            const targetRoleId = String(args.roleId).replace(/[^0-9]/g, '');
                             try {
-                                const member = await message.guild.members.fetch(targetUserId);
-                                await member.roles.remove(targetRoleId);
-                                await message.channel.send(`✅ Successfully removed role <@&${targetRoleId}> from <@${targetUserId}>.`);
+                                const targetMember = member || await message.guild.members.fetch(targetUserId);
+                                await targetMember.roles.remove(targetRoleId);
+                                await message.channel.send(`✅ Successfully removed role <@&${targetRoleId}> from **${targetMember.user.tag}**.`);
                             } catch (err) {
                                 console.error("Remove role error:", err);
                                 await message.channel.send(`❌ Failed to remove role: ${err.message}`).catch(()=>{});
@@ -818,12 +934,15 @@ RULES:
                                 await message.channel.send(`❌ Failed to unlock channel: ${err.message}`).catch(()=>{});
                             }
                         } else if (toolCall.function.name === 'set_nickname') {
-                            const targetUserId = cleanId(args.userId);
+                            if (!targetUserId) {
+                                await message.channel.send(`❌ Could not find user matching **"${targetQuery}"**.`);
+                                continue;
+                            }
                             const nickname = args.nickname;
                             try {
-                                const member = await message.guild.members.fetch(targetUserId);
-                                await member.setNickname(nickname);
-                                await message.channel.send(`✅ Changed <@${targetUserId}>'s nickname to **${nickname}**.`);
+                                const targetMember = member || await message.guild.members.fetch(targetUserId);
+                                await targetMember.setNickname(nickname);
+                                await message.channel.send(`✅ Changed **${targetMember.user.tag}**'s nickname to **${nickname}**.`);
                             } catch (err) {
                                 console.error("Nickname error:", err);
                                 await message.channel.send(`❌ Failed to change nickname: ${err.message}`).catch(()=>{});
