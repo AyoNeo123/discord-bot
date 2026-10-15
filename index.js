@@ -658,12 +658,36 @@ RULES:
                 { role: "user", content: prompt || "Hello" }
             ];
 
-            const chatCompletion = await groq.chat.completions.create({
-                messages: chatMessages,
-                model: "llama-3.3-70b-versatile",
-                tools: tools,
-                tool_choice: "auto",
-            });
+            // Try Groq models with automatic fallback
+            const candidateModels = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "openai/gpt-oss-20b", "llama3-70b-8192"];
+            let chatCompletion = null;
+            let lastModelError = null;
+
+            for (const modelCandidate of candidateModels) {
+                try {
+                    chatCompletion = await groq.chat.completions.create({
+                        messages: chatMessages,
+                        model: modelCandidate,
+                        tools: tools,
+                        tool_choice: "auto",
+                    });
+                    if (chatCompletion) {
+                        console.log(`[Groq] Successfully generated completion using model: ${modelCandidate}`);
+                        break;
+                    }
+                } catch (err) {
+                    lastModelError = err;
+                    if (err.message && (err.message.includes('does not exist') || err.message.includes('model_not_found') || err.code === 'model_not_found')) {
+                        console.warn(`[Groq] Model ${modelCandidate} not available (${err.message}), trying next candidate...`);
+                        continue;
+                    }
+                    throw err;
+                }
+            }
+
+            if (!chatCompletion) {
+                throw lastModelError || new Error("Failed to get response from Groq models");
+            }
 
             const responseMessage = chatCompletion.choices[0]?.message;
             const toolCalls = responseMessage?.tool_calls;
